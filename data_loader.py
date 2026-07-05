@@ -385,7 +385,7 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     return data, clause_to_idx, entity_to_idx, fsc_qa_dataset_train, fsc_qa_dataset_test
     
 # 단독 실행 테스트용
-if __name__ == "__main__":
+# if __name__ == "__main__":
     # print('---스크립트 실행 시작---')
     # fsc = fsc_dataset_preprocessing('./data/for_review_corrected.xlsx')
     # print(fsc.head())
