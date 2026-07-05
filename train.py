@@ -1,11 +1,11 @@
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+import os
 from data_loader import load_and_build_graph
 from hgt_model import FinancialHGT
 from sentence_transformers import SentenceTransformer
 import random
-# safetensors 라이브러리에서 PyTorch용 저장 함수 임포트
 from safetensors.torch import save_file 
 
 # ==========================================
@@ -44,6 +44,10 @@ def train():
     graph_data = graph_data.to(device)
     
     # 2. 텍스트 쿼리 인코더 (BGE-M3)
+    # 주의: 처음 실행 시 BGE-M3 모델(약 2.3GB)이 다운로드됨
+    # Windows: C:\Users\<username>\.cache\huggingface\hub\models--BAAI--bge-m3\
+    # Linux/Mac: ~/.cache/huggingface/hub/models--BAAI--bge-m3/
+    print("BGE-M3 모델 로드 중... (첫 실행 시 ~2.3GB 다운로드될 수 있습니다)")
     text_encoder = SentenceTransformer('BAAI/bge-m3').to(device)
 
     # 3. HGT 모델 초기화
@@ -98,19 +102,23 @@ def train():
         print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {total_loss/len(fsc_qa_dataset):.4f}")
 
     # ==========================================
-    # 5. Safetensors 포맷으로 모델 저장
+    # 5. Safetensors 포맷으로 모델 저장 (프로젝트 폴더 내)
     # ==========================================
-    save_path = "./financial_hgt_model.safetensors"
-    
+    save_path = os.path.join(os.path.dirname(__file__), "financial_hgt_model.safetensors")
+
     # 모델의 가중치(state_dict)를 추출
     state_dict = model.state_dict()
-    
+
     # Safetensors는 메모리 연속성(contiguous)을 요구하므로 변환 처리 (에러 방지용)
     contiguous_state_dict = {k: v.contiguous() for k, v in state_dict.items()}
-    
-    # 모델 저장 실행
+
+    # 모델 저장 실행 (safetensors 형식은 매우 안전하고 torch 취약점 영향 없음)
     save_file(contiguous_state_dict, save_path)
-    print(f"\n✅ 학습 완료! 모델이 안전한 safetensors 포맷으로 '{save_path}'에 저장되었습니다.")
+    model_size_mb = os.path.getsize(save_path) / (1024 * 1024)
+    print(f"\n✅ 학습 완료!")
+    print(f"   📁 저장 경로: {os.path.abspath(save_path)}")
+    print(f"   💾 파일 크기: {model_size_mb:.2f} MB")
+    print(f"   🔒 형식: safetensors (안전한 가중치 직렬화 형식)")
 
 if __name__ == "__main__":
     train()
