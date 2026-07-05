@@ -191,7 +191,7 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     fsc = fsc_dataset_preprocessing(file='./data/for_review_corrected.xlsx',nodes_df=nodes_df)
 
 
-    triplets_df['new_johang'] = triplets_df_df['law_nm']+ ' ' +triplets_df['article_number'].apply(convert_legal_citation)
+    triplets_df['new_johang'] = triplets_df['law_nm']+ ' ' +triplets_df['article_number'].apply(convert_legal_citation)
 
     # 1. 노드 딕셔너리 및 인덱스 매핑 구축
     clause_list = nodes_df['new_johang'].dropna().unique().tolist()
@@ -292,7 +292,7 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     return data, clause_to_idx, entity_to_idx, fsc_qa_dataset
     
 # 단독 실행 테스트용
-if __name__ == "__main__":
+# if __name__ == "__main__":
     # print('---스크립트 실행 시작---')
     # fsc = fsc_dataset_preprocessing('./data/for_review_corrected.xlsx')
     # print(fsc.head())

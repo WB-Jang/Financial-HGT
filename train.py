@@ -40,7 +40,7 @@ def train():
     print(f"사용 기기: {device}")
 
     # 1. 데이터 로드 (빠른 테스트를 위해 dummy 사용, 실제로는 False)
-    graph_data, clause_to_idx, entity_to_idx,fsc_qa_dataset = load_and_build_graph('./data/nodes_20260626_171919.csv', './data/triplets_20260626_171919.csv', use_dummy_emb=False)
+    graph_data, clause_to_idx, entity_to_idx,fsc_qa_dataset = load_and_build_graph('./data/nodes.csv', './data/triplets.csv', use_dummy_emb=False)
     graph_data = graph_data.to(device)
     
     # 2. 텍스트 쿼리 인코더 (BGE-M3) - 실제 환경에서는 메모리에 올립니다.
