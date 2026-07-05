@@ -54,20 +54,32 @@ def train():
     model = FinancialHGT(metadata=graph_data.metadata(), in_channels=1024, hidden_channels=256).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-    # 4. 질의 임베딩 사전 계산 (text_encoder는 고정(frozen)이므로 epoch마다 다시 계산할 필요가 없습니다)
+    # 4. 질의 임베딩 사전 계산 (배치 처리로 메모리 절약)
+    print("질의 임베딩 사전 계산 중...")
     query_texts = [item["query"] for item in fsc_qa_dataset]
-    query_embs = torch.tensor(text_encoder.encode(query_texts, show_progress_bar=True)).to(device)
+    batch_size_encode = 128  # 임베딩 배치 크기 (메모리 절약)
+    query_embs_list = []
+
+    for i in range(0, len(query_texts), batch_size_encode):
+        batch_texts = query_texts[i:i+batch_size_encode]
+        batch_embs = torch.tensor(text_encoder.encode(batch_texts, show_progress_bar=False))
+        query_embs_list.append(batch_embs)
+
+    query_embs = torch.cat(query_embs_list, dim=0).to(device)
+    print(f"✓ {len(query_embs):,}개 질의 임베딩 계산 완료 (배치 크기: {batch_size_encode})")
 
     model.train()
     epochs = 10
 
     for epoch in range(epochs):
         total_loss = 0
-        
+
         # 매 Epoch마다 전체 그래프의 노드 임베딩을 한 번 업데이트합니다. (Graph is static)
+        print(f"Epoch {epoch+1}/{epochs} - 그래프 노드 임베딩 계산 중...")
         updated_node_embs = model(graph_data.x_dict, graph_data.edge_index_dict)
         clause_embs = updated_node_embs['clause'] # (Num_clauses x 256)
-        
+        print(f"Epoch {epoch+1}/{epochs} - 학습 중...")
+
         for i, item in enumerate(fsc_qa_dataset):
             optimizer.zero_grad()
 
@@ -76,28 +88,34 @@ def train():
 
             # (2) Positive Virtual Node 생성
             pos_indices = [clause_to_idx[c] for c in item["positive_clauses"] if c in clause_to_idx]
-            if not pos_indices: continue
+            if not pos_indices:
+                continue
             pos_vnode = model.aggregate_virtual_node(clause_embs, pos_indices)
-            
+
             # (3) Negative Virtual Nodes 생성
             neg_vnodes_list = []
             for neg_group in item["hard_negative_clauses"]:
                 neg_indices = [clause_to_idx[c] for c in neg_group if c in clause_to_idx]
                 if neg_indices:
                     neg_vnodes_list.append(model.aggregate_virtual_node(clause_embs, neg_indices))
-            
+
             if not neg_vnodes_list:
                 # 하드 네거티브가 없으면 랜덤 샘플링 대체 로직 필요
                 neg_vnodes_list.append(torch.randn((1, 1024)).to(device))
-                
+
             neg_vnodes = torch.cat(neg_vnodes_list, dim=0) # (Num_negs x 1024)
-            
+
             # (4) Loss 계산 및 역전파
             loss = info_nce_loss(q_emb, pos_vnode, neg_vnodes)
             loss.backward()
             optimizer.step()
-            
+
             total_loss += loss.item()
+
+            # 메모리 정리 (매 50 스텝마다)
+            if (i + 1) % 50 == 0:
+                torch.cuda.empty_cache()
+                print(f"  [{i+1:,}/{len(fsc_qa_dataset):,}] Loss: {total_loss/(i+1):.4f}")
             
         print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {total_loss/len(fsc_qa_dataset):.4f}")
 
