@@ -40,29 +40,23 @@ def train():
     print(f"사용 기기: {device}")
 
     # 1. 데이터 로드 (빠른 테스트를 위해 dummy 사용, 실제로는 False)
-    graph_data, clause_to_idx, entity_to_idx,fsc_qa_dataset = load_and_build_graph('./data/nodes.csv', './data/triplets.csv', use_dummy_emb=False)
+    graph_data, clause_to_idx, entity_to_idx, fsc_qa_dataset, fsc_qa_dataset_test = load_and_build_graph('./data/nodes_20260704_231120.csv', './data/triplets_20260704_231120.csv', use_dummy_emb=False)
     graph_data = graph_data.to(device)
     
-    # 2. 텍스트 쿼리 인코더 (BGE-M3) - 실제 환경에서는 메모리에 올립니다.
-    # text_encoder = SentenceTransformer('BAAI/bge-m3').to(device)
-    
+    # 2. 텍스트 쿼리 인코더 (BGE-M3)
+    text_encoder = SentenceTransformer('BAAI/bge-m3').to(device)
+
     # 3. HGT 모델 초기화
     model = FinancialHGT(metadata=graph_data.metadata(), in_channels=1024, hidden_channels=256).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-    # 4. FSC 학습 데이터 모사 (가상의 질의와 정답 조항 리스트)
-    # fsc_qa_dataset = [
-    #     {
-    #         "query": "사외이사의 자격요건과 이를 위반했을 때의 과태료 처분 절차는 어떻게 되나요?",
-    #         "positive_clauses": ["제1조", "제18조"],
-    #         "hard_negative_clauses": [["제20조"], ["제41조", "제2조"]] # 오답 가상 노드들용 리스트
-    #     },
-    #     # ... 추가 데이터 ...
-    # ]
+    # 4. 질의 임베딩 사전 계산 (text_encoder는 고정(frozen)이므로 epoch마다 다시 계산할 필요가 없습니다)
+    query_texts = [item["query"] for item in fsc_qa_dataset]
+    query_embs = torch.tensor(text_encoder.encode(query_texts, show_progress_bar=True)).to(device)
 
     model.train()
     epochs = 10
-    
+
     for epoch in range(epochs):
         total_loss = 0
         
@@ -70,14 +64,12 @@ def train():
         updated_node_embs = model(graph_data.x_dict, graph_data.edge_index_dict)
         clause_embs = updated_node_embs['clause'] # (Num_clauses x 256)
         
-        for item in fsc_qa_dataset:
+        for i, item in enumerate(fsc_qa_dataset):
             optimizer.zero_grad()
-            
-            # (1) Query 벡터화 (실제로는 text_encoder 활용)
-            # q_text = item["query"]
-            # q_emb = torch.tensor(text_encoder.encode([q_text])).to(device) 
-            q_emb = torch.randn((1, 1024)).to(device) # 더미 대체
-            
+
+            # (1) Query 벡터화 (사전 계산된 BGE-M3 임베딩 사용)
+            q_emb = query_embs[i].unsqueeze(0)
+
             # (2) Positive Virtual Node 생성
             pos_indices = [clause_to_idx[c] for c in item["positive_clauses"] if c in clause_to_idx]
             if not pos_indices: continue
