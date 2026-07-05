@@ -1,5 +1,27 @@
 # 가상환경 폴더 무시
 .venv/
+venv/
+ENV/
 
-# (추가 팁) 파이썬 실행 시 생기는 캐시 파일들도 함께 무시해 주면 좋습니다.
+# 파이썬 실행 시 생기는 캐시 파일들
 __pycache__/
+*.py[cod]
+*$py.class
+
+# 학습된 모델 (매우 큼, git 제외)
+*.safetensors
+financial_hgt_model.*
+
+# HuggingFace 모델 캐시 (Windows: C:\Users\<username>\.cache\huggingface\hub\)
+# 로컬에서 다운로드되는 BGE-M3 같은 모델들은 .gitignore 대상 아님 (로컬 전용)
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -299,6 +299,9 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
         entity_embs = torch.randn((len(entity_list), 1024))
     else:
         print("BGE-M3 임베딩 추출 중... (시간이 소요될 수 있습니다)")
+        # 주의: 처음 실행 시 BGE-M3 모델(약 2.3GB)이 다운로드됨
+        # Windows: C:\Users\<username>\.cache\huggingface\hub\models--BAAI--bge-m3\
+        # Linux/Mac: ~/.cache/huggingface/hub/models--BAAI--bge-m3/
         encoder = SentenceTransformer('BAAI/bge-m3')
         
         # Clause는 full_text를 인코딩
