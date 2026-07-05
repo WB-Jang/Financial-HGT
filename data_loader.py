@@ -303,16 +303,29 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
         # Windows: C:\Users\<username>\.cache\huggingface\hub\models--BAAI--bge-m3\
         # Linux/Mac: ~/.cache/huggingface/hub/models--BAAI--bge-m3/
         encoder = SentenceTransformer('BAAI/bge-m3')
-        
-        # Clause는 full_text를 인코딩
+        batch_size_encode = 64
+
+        # Clause는 full_text를 인코딩 (배치 처리로 메모리 절약)
         clause_texts = []
         for clause in clause_list:
             text = nodes_df[nodes_df['new_johang'] == clause]['full_text'].iloc[0]
             clause_texts.append(str(text))
-        clause_embs = torch.tensor(encoder.encode(clause_texts, show_progress_bar=True))
-        
-        # Entity는 명칭 자체를 인코딩 (필요시 주변 context 결합 가능)
-        entity_embs = torch.tensor(encoder.encode(entity_list, show_progress_bar=True))
+        clause_embs_list = []
+        for i in range(0, len(clause_texts), batch_size_encode):
+            batch_texts = clause_texts[i:i+batch_size_encode]
+            batch_embs = torch.tensor(encoder.encode(batch_texts, show_progress_bar=False))
+            clause_embs_list.append(batch_embs)
+        clause_embs = torch.cat(clause_embs_list, dim=0)
+        print(f"✓ {len(clause_embs):,}개 조항 임베딩 계산 완료 (배치 크기: {batch_size_encode})")
+
+        # Entity는 명칭 자체를 인코딩 (배치 처리로 메모리 절약)
+        entity_embs_list = []
+        for i in range(0, len(entity_list), batch_size_encode):
+            batch_entities = entity_list[i:i+batch_size_encode]
+            batch_embs = torch.tensor(encoder.encode(batch_entities, show_progress_bar=False))
+            entity_embs_list.append(batch_embs)
+        entity_embs = torch.cat(entity_embs_list, dim=0)
+        print(f"✓ {len(entity_embs):,}개 엔터티 임베딩 계산 완료 (배치 크기: {batch_size_encode})")
 
     # 3. HeteroData 객체 생성 및 노드 피처 할당 (BGE-M3 임베딩을 실제 노드 피처로 사용)
     data = HeteroData()
