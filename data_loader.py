@@ -35,6 +35,43 @@ def convert_legal_citation(text):
     return re.sub(pattern, replacer, text)
 
 
+def normalize_johang_key(law_nm, article_raw, hang_num=None):
+    """
+    법령명 + 원본 조항 표기(및 항 번호)를 '법령명 제X조[의Y] 제X항' 기본 포맷으로 정규화합니다.
+
+    nodes_df(조/항 단위)와 triplets_df(호/목 단위까지 세분화, 원문자 표기 혼재)가
+    서로 다른 세밀도와 공백 표기를 사용해 조항 키가 어긋나던 문제(약 30~40% 매칭 실패)를
+    막기 위해, 두 데이터프레임의 new_johang 키를 이 함수 하나로 통일해서 생성합니다.
+    """
+    law_nm = (law_nm or '').strip()
+    if not isinstance(article_raw, str):
+        article_raw = ''
+
+    # 1. 원문자(①②...)를 '제N항'으로 변환 (조 뒤에 바로 붙어있는 경우)
+    circles = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+    def circle_repl(m):
+        return f"{m.group(1)} 제{circles.index(m.group(2)) + 1}항"
+
+    text = re.sub(r'(제\s*\d+(?:-\d+)?\s*조(?:의\s*\d+)?)\s*([①-⑳])', circle_repl, article_raw)
+
+    # 2. 조(+의Y) 추출 - 내부 공백 제거로 표기 통일 ('제 1 조' -> '제1조')
+    jo_match = re.search(r'제\s*\d+(?:-\d+)?\s*조(?:\s*의\s*\d+)?', text)
+    jo = re.sub(r'\s+', '', jo_match.group(0)) if jo_match else re.sub(r'\s+', '', text.strip())
+
+    # 3. 항 추출 - 조 뒤에 명시된 '제N항'만 인정하고, 그 뒤의 호/목 세부 표기는 버림
+    rest = text[jo_match.end():] if jo_match else ''
+    hang_match = re.search(r'제\s*\d+\s*항', rest)
+    if hang_match:
+        hang = re.sub(r'\s+', '', hang_match.group(0))
+    elif hang_num is not None and pd.notna(hang_num):
+        hang = f"제{int(hang_num)}항"
+    else:
+        hang = ''
+
+    return ' '.join(p for p in [law_nm, jo, hang] if p)
+
+
 def split_fsc_train_test(fsc, test_size=100, random_state=42, strata_col='# of laws_clean', query_col='jilui'):
     """
     질의(jilui) 단위로 층화추출을 수행하여 fsc 데이터프레임에 'split'('train'/'test') 컬럼을 부여합니다.
@@ -228,13 +265,22 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     nodes_df = pd.read_csv(nodes_path)
     triplets_df = pd.read_csv(triplets_path)
 
-    nodes_df['hang_number'] = nodes_df['hang_number'].apply(lambda x: f"제{int(x)}항" if pd.notna(x) else "")
-    nodes_df['new_johang']=nodes_df['law_nm']+ ' ' +nodes_df['article_number']+ ' ' +nodes_df['hang_number']
-    
+    # nodes_df/triplets_df가 서로 다른 세밀도(조/항 vs 호/목)와 공백 표기를 쓰던 문제를 막기 위해
+    # 두 데이터프레임 모두 normalize_johang_key()로 '법령명 제X조[의Y] 제X항' 포맷의 키를 생성합니다.
+    nodes_df['new_johang'] = [
+        normalize_johang_key(law_nm, article_number, hang_number)
+        for law_nm, article_number, hang_number in zip(
+            nodes_df['law_nm'], nodes_df['article_number'], nodes_df['hang_number']
+        )
+    ]
+
     fsc = fsc_dataset_preprocessing(file='./data/for_review_corrected.xlsx',nodes_df=nodes_df)
 
 
-    triplets_df['new_johang'] = triplets_df['law_nm']+ ' ' +triplets_df['article_number'].apply(convert_legal_citation)
+    triplets_df['new_johang'] = [
+        normalize_johang_key(law_nm, article_number)
+        for law_nm, article_number in zip(triplets_df['law_nm'], triplets_df['article_number'])
+    ]
 
     # 1. 노드 딕셔너리 및 인덱스 매핑 구축
     clause_list = nodes_df['new_johang'].dropna().unique().tolist()
