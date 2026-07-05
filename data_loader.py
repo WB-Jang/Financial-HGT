@@ -1,7 +1,10 @@
 
 import pandas as pd
+import numpy as np
 import torch
+import torch.nn.functional as F
 import re
+import random
 from torch_geometric.data import HeteroData
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
@@ -30,6 +33,44 @@ def convert_legal_citation(text):
     
     # 정규식 패턴에 매칭되는 부분을 찾아 replacer 함수의 결과로 치환
     return re.sub(pattern, replacer, text)
+
+
+def split_fsc_train_test(fsc, test_size=100, random_state=42, strata_col='# of laws_clean', query_col='jilui'):
+    """
+    질의(jilui) 단위로 층화추출을 수행하여 fsc 데이터프레임에 'split'('train'/'test') 컬럼을 부여합니다.
+    strata_col(참조 법률 수) 값의 분포 비율을 test set에서도 유지하고,
+    동일 질의가 중복 행으로 여러 번 등장하더라도 train/test에 동시에 섞이지 않도록(leakage 방지)
+    질의 단위로 먼저 중복을 제거한 뒤 표본을 추출합니다.
+    """
+    rng = np.random.default_rng(random_state)
+    fsc = fsc.copy()
+    fsc['split'] = 'train'
+
+    unique_queries = fsc.drop_duplicates(subset=query_col)[[query_col, strata_col]]
+    total = len(unique_queries)
+
+    # 층(stratum)별 목표 test 표본 수를 비율대로 배분하고,
+    # 최대잔여법(largest remainder method)으로 반올림 오차를 보정해 정확히 test_size에 맞춥니다.
+    group_sizes = unique_queries[strata_col].value_counts()
+    quotas = group_sizes / total * test_size
+    floor_quotas = np.floor(quotas).astype(int)
+    remainder = int(test_size - floor_quotas.sum())
+    frac_order = (quotas - floor_quotas).sort_values(ascending=False).index
+    final_quotas = floor_quotas.copy()
+    for stratum in frac_order[:remainder]:
+        final_quotas[stratum] += 1
+
+    test_queries = []
+    for stratum, quota in final_quotas.items():
+        pool = unique_queries.loc[unique_queries[strata_col] == stratum, query_col].tolist()
+        quota = min(quota, len(pool))
+        if quota <= 0:
+            continue
+        chosen = rng.choice(pool, size=quota, replace=False)
+        test_queries.extend(chosen.tolist())
+
+    fsc.loc[fsc[query_col].isin(test_queries), 'split'] = 'test'
+    return fsc
 
 
 def fsc_dataset_preprocessing(file,nodes_df):
@@ -98,7 +139,9 @@ def fsc_dataset_preprocessing(file,nodes_df):
     # 3. df1에 적용하여 새로운 컬럼 생성
     fsc['full_text_matched'] = fsc['new_johang_clean_split_'].apply(fetch_full_texts)
 
-    col_list = ['row','jilui','# of laws_clean','new_johang_clean_split_','full_text_matched']
+    fsc = split_fsc_train_test(fsc, test_size=100, strata_col='# of laws_clean', query_col='jilui')
+
+    col_list = ['row','jilui','# of laws_clean','new_johang_clean_split_','full_text_matched','split']
     fsc = fsc[col_list]
     return fsc
 def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda', num_negatives=2):
@@ -191,7 +234,7 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     fsc = fsc_dataset_preprocessing(file='./data/for_review_corrected.xlsx',nodes_df=nodes_df)
 
 
-    triplets_df['new_johang'] = triplets_df_df['law_nm']+ ' ' +triplets_df['article_number'].apply(convert_legal_citation)
+    triplets_df['new_johang'] = triplets_df['law_nm']+ ' ' +triplets_df['article_number'].apply(convert_legal_citation)
 
     # 1. 노드 딕셔너리 및 인덱스 매핑 구축
     clause_list = nodes_df['new_johang'].dropna().unique().tolist()
@@ -222,12 +265,10 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
         # Entity는 명칭 자체를 인코딩 (필요시 주변 context 결합 가능)
         entity_embs = torch.tensor(encoder.encode(entity_list, show_progress_bar=True))
 
-    # 3. HeteroData 객체 생성 및 노드 피처 할당
+    # 3. HeteroData 객체 생성 및 노드 피처 할당 (BGE-M3 임베딩을 실제 노드 피처로 사용)
     data = HeteroData()
-    #data['clause'].x = clause_embs
-    #data['entity'].x = entity_embs
-    data['clause'].x = clause_texts
-    data['entity'].x = entity_list
+    data['clause'].x = clause_embs.float()
+    data['entity'].x = entity_embs.float()
 
     # 4. 엣지 인덱스(Edge Indices) 구축
     # 4.1 Clause -> Entity (HAS_SUBJECT, HAS_OBJECT)
@@ -287,13 +328,17 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
             data['entity', edge_type_name, 'entity'].edge_index = torch.tensor(edges, dtype=torch.long)
 
     print(f"그래프 구축 완료: {data}")
-    fsc_qa_dataset = build_fsc_qa_dataset_hard_negative(fsc_df=fsc, nodes_df=nodes_df, encoder=encoder, device='cuda', num_negatives=3)
-    print(f"fsc 학습용 데이터 셋 구축 완료")
-    return data, clause_to_idx, entity_to_idx, fsc_qa_dataset
+
+    fsc_train = fsc[fsc['split'] == 'train'].reset_index(drop=True)
+    fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
+    print(f"fsc 질의 분할 완료: train {len(fsc_train)}건 / test {len(fsc_test)}건")
+
+    fsc_qa_dataset_train = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_train, nodes_df=nodes_df, encoder=encoder, device='cuda', num_negatives=3)
+    fsc_qa_dataset_test = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_test, nodes_df=nodes_df, encoder=encoder, device='cuda', num_negatives=3)
+    print(f"fsc 학습용/평가용 데이터 셋 구축 완료")
+    return data, clause_to_idx, entity_to_idx, fsc_qa_dataset_train, fsc_qa_dataset_test
     
 # 단독 실행 테스트용
 if __name__ == "__main__":
-    # print('---스크립트 실행 시작---')
-    # fsc = fsc_dataset_preprocessing('./data/for_review_corrected.xlsx')
-    # print(fsc.head())
+    pass
 
