@@ -56,7 +56,7 @@ def train():
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
     # 4. 질의 임베딩 사전 계산 (배치 처리로 메모리 절약)
-    print("질의 임베딩 사전 계산 중...")
+    print(f"질의 임베딩 사전 계산 중... (CPU 인코딩이라 시간이 걸릴 수 있습니다)", flush=True)
     query_texts = [item["query"] for item in fsc_qa_dataset]
     batch_size_encode = 64  # 더 작은 배치 크기 (메모리 절약)
     query_embs_list = []
@@ -65,6 +65,8 @@ def train():
         batch_texts = query_texts[i:i+batch_size_encode]
         batch_embs = torch.tensor(text_encoder.encode(batch_texts, show_progress_bar=False))
         query_embs_list.append(batch_embs)
+        done = min(i + batch_size_encode, len(query_texts))
+        print(f"  [{done:,}/{len(query_texts):,}] 처리 완료", flush=True)
 
     query_embs = torch.cat(query_embs_list, dim=0).to(device)
     del text_encoder  # 메모리 정리

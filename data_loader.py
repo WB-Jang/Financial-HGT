@@ -307,30 +307,29 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
         batch_size_encode = 16  # 더 작은 배치로 메모리 절약
 
         # Clause는 full_text를 인코딩 (배치 처리로 메모리 절약)
-        clause_texts = []
-        for clause in clause_list:
-            text = nodes_df[nodes_df['new_johang'] == clause]['full_text'].iloc[0]
-            clause_texts.append(str(text))
-        print(f"  {len(clause_texts):,}개 조항 텍스트 인코딩 중...")
+        # dict 매핑으로 O(1) 조회 (기존 nodes_df 반복 필터링은 O(N*M)이라 매우 느림)
+        clause_to_text = nodes_df.drop_duplicates('new_johang').set_index('new_johang')['full_text']
+        clause_texts = [str(clause_to_text[clause]) for clause in clause_list]
+        print(f"  {len(clause_texts):,}개 조항 텍스트 인코딩 중...", flush=True)
         clause_embs_list = []
         for i in range(0, len(clause_texts), batch_size_encode):
             batch_texts = clause_texts[i:i+batch_size_encode]
             batch_embs = torch.tensor(encoder.encode(batch_texts, show_progress_bar=False))
             clause_embs_list.append(batch_embs)
-            if (i + batch_size_encode) % 100 == 0 or i + batch_size_encode >= len(clause_texts):
-                print(f"    [{i+batch_size_encode:,}/{len(clause_texts):,}] 처리 완료")
+            done = min(i + batch_size_encode, len(clause_texts))
+            print(f"    [{done:,}/{len(clause_texts):,}] 처리 완료", flush=True)
         clause_embs = torch.cat(clause_embs_list, dim=0)
         print(f"✓ {len(clause_embs):,}개 조항 임베딩 계산 완료")
 
         # Entity는 명칭 자체를 인코딩 (배치 처리로 메모리 절약)
-        print(f"  {len(entity_list):,}개 엔터티 텍스트 인코딩 중...")
+        print(f"  {len(entity_list):,}개 엔터티 텍스트 인코딩 중...", flush=True)
         entity_embs_list = []
         for i in range(0, len(entity_list), batch_size_encode):
             batch_entities = entity_list[i:i+batch_size_encode]
             batch_embs = torch.tensor(encoder.encode(batch_entities, show_progress_bar=False))
             entity_embs_list.append(batch_embs)
-            if (i + batch_size_encode) % 100 == 0 or i + batch_size_encode >= len(entity_list):
-                print(f"    [{i+batch_size_encode:,}/{len(entity_list):,}] 처리 완료")
+            done = min(i + batch_size_encode, len(entity_list))
+            print(f"    [{done:,}/{len(entity_list):,}] 처리 완료", flush=True)
         entity_embs = torch.cat(entity_embs_list, dim=0)
         print(f"✓ {len(entity_embs):,}개 엔터티 임베딩 계산 완료")
 
