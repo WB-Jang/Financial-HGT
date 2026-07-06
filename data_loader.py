@@ -302,30 +302,41 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
         # 주의: 처음 실행 시 BGE-M3 모델(약 2.3GB)이 다운로드됨
         # Windows: C:\Users\<username>\.cache\huggingface\hub\models--BAAI--bge-m3\
         # Linux/Mac: ~/.cache/huggingface/hub/models--BAAI--bge-m3/
-        encoder = SentenceTransformer('BAAI/bge-m3')
-        batch_size_encode = 64
+        # CPU에서 실행하여 VRAM 절약 (8GB GPU의 OOM 방지)
+        encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
+        batch_size_encode = 16  # 더 작은 배치로 메모리 절약
 
         # Clause는 full_text를 인코딩 (배치 처리로 메모리 절약)
         clause_texts = []
         for clause in clause_list:
             text = nodes_df[nodes_df['new_johang'] == clause]['full_text'].iloc[0]
             clause_texts.append(str(text))
+        print(f"  {len(clause_texts):,}개 조항 텍스트 인코딩 중...")
         clause_embs_list = []
         for i in range(0, len(clause_texts), batch_size_encode):
             batch_texts = clause_texts[i:i+batch_size_encode]
             batch_embs = torch.tensor(encoder.encode(batch_texts, show_progress_bar=False))
             clause_embs_list.append(batch_embs)
+            if (i + batch_size_encode) % 100 == 0 or i + batch_size_encode >= len(clause_texts):
+                print(f"    [{i+batch_size_encode:,}/{len(clause_texts):,}] 처리 완료")
         clause_embs = torch.cat(clause_embs_list, dim=0)
-        print(f"✓ {len(clause_embs):,}개 조항 임베딩 계산 완료 (배치 크기: {batch_size_encode})")
+        print(f"✓ {len(clause_embs):,}개 조항 임베딩 계산 완료")
 
         # Entity는 명칭 자체를 인코딩 (배치 처리로 메모리 절약)
+        print(f"  {len(entity_list):,}개 엔터티 텍스트 인코딩 중...")
         entity_embs_list = []
         for i in range(0, len(entity_list), batch_size_encode):
             batch_entities = entity_list[i:i+batch_size_encode]
             batch_embs = torch.tensor(encoder.encode(batch_entities, show_progress_bar=False))
             entity_embs_list.append(batch_embs)
+            if (i + batch_size_encode) % 100 == 0 or i + batch_size_encode >= len(entity_list):
+                print(f"    [{i+batch_size_encode:,}/{len(entity_list):,}] 처리 완료")
         entity_embs = torch.cat(entity_embs_list, dim=0)
-        print(f"✓ {len(entity_embs):,}개 엔터티 임베딩 계산 완료 (배치 크기: {batch_size_encode})")
+        print(f"✓ {len(entity_embs):,}개 엔터티 임베딩 계산 완료")
+
+        # 인코더 메모리 정리
+        del encoder
+        torch.cuda.empty_cache()
 
     # 3. HeteroData 객체 생성 및 노드 피처 할당 (BGE-M3 임베딩을 실제 노드 피처로 사용)
     data = HeteroData()

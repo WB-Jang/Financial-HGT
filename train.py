@@ -47,8 +47,9 @@ def train():
     # 주의: 처음 실행 시 BGE-M3 모델(약 2.3GB)이 다운로드됨
     # Windows: C:\Users\<username>\.cache\huggingface\hub\models--BAAI--bge-m3\
     # Linux/Mac: ~/.cache/huggingface/hub/models--BAAI--bge-m3/
+    # CPU에서 실행하여 VRAM 절약 (8GB GPU의 OOM 방지)
     print("BGE-M3 모델 로드 중... (첫 실행 시 ~2.3GB 다운로드될 수 있습니다)")
-    text_encoder = SentenceTransformer('BAAI/bge-m3').to(device)
+    text_encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
 
     # 3. HGT 모델 초기화
     model = FinancialHGT(metadata=graph_data.metadata(), in_channels=1024, hidden_channels=256).to(device)
@@ -57,7 +58,7 @@ def train():
     # 4. 질의 임베딩 사전 계산 (배치 처리로 메모리 절약)
     print("질의 임베딩 사전 계산 중...")
     query_texts = [item["query"] for item in fsc_qa_dataset]
-    batch_size_encode = 128  # 임베딩 배치 크기 (메모리 절약)
+    batch_size_encode = 64  # 더 작은 배치 크기 (메모리 절약)
     query_embs_list = []
 
     for i in range(0, len(query_texts), batch_size_encode):
@@ -66,6 +67,8 @@ def train():
         query_embs_list.append(batch_embs)
 
     query_embs = torch.cat(query_embs_list, dim=0).to(device)
+    del text_encoder  # 메모리 정리
+    torch.cuda.empty_cache()
     print(f"✓ {len(query_embs):,}개 질의 임베딩 계산 완료 (배치 크기: {batch_size_encode})")
 
     model.train()
