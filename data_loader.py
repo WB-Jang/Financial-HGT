@@ -187,30 +187,57 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
     'Hard Negative' 조항들을 추출해 학습용 데이터셋으로 구성합니다.
     """
     print("🎯 Hard Negative 추출을 위한 전체 조항 임베딩 생성 중...")
-    
+
     # 1. 탐색 대상이 될 전체 조항 리스트와 텍스트 준비
     unique_nodes = nodes_df.dropna(subset=['new_johang']).drop_duplicates(subset=['new_johang'])
     clause_list = unique_nodes['new_johang'].tolist()
+    clause_set = set(clause_list)
     clause_texts = unique_nodes['full_text'].astype(str).tolist()
-    
+
+    # fsc의 positive clause는 '법령명 제X조'처럼 항 없이 조 단위로만 표기된 경우가 많은데,
+    # 그래프 노드(clause_list)는 항 단위로 나뉘어 있어 그대로는 매칭되지 않는다.
+    # 조 단위 키를 그 조에 속한 모든 항 단위 노드로 확장해서 매칭시킨다.
+    article_to_paragraph_clauses = defaultdict(list)
+    for key in clause_list:
+        article_key = re.sub(r'\s*제\s*\d+\s*항$', '', key).strip()
+        if article_key != key:
+            article_to_paragraph_clauses[article_key].append(key)
+
+    def expand_to_graph_clauses(key):
+        if key in clause_set:
+            return [key]
+        return article_to_paragraph_clauses.get(key, [])
+
     # 2. 전체 조항 텍스트를 한 번에 임베딩 (GPU 활용 속도 최적화)
     # convert_to_tensor=True 를 사용하여 PyTorch 텐서로 바로 반환받습니다.
     clause_embs = encoder.encode(clause_texts, convert_to_tensor=True, show_progress_bar=True).to(device)
     clause_embs = F.normalize(clause_embs, p=2, dim=-1) # 코사인 유사도를 위한 L2 정규화
-    
+
     qa_dataset = []
-    
+    skipped_no_match = 0
+
     print("🔍 질의별 Hard Negative 매핑 및 데이터셋 조립 중...")
     for _, row in fsc_df.iterrows():
         query = str(row['jilui']).strip()
-        pos_clauses = row['new_johang_clean_split_']
-        
+        pos_clauses_raw = row['new_johang_clean_split_']
+
         # 유효하지 않은 행 건너뛰기
-        if not query or not isinstance(pos_clauses, list):
+        if not query or not isinstance(pos_clauses_raw, list):
+            skipped_no_match += 1
             continue
-            
+
+        pos_clauses = []
+        for c in pos_clauses_raw:
+            pos_clauses.extend(expand_to_graph_clauses(c))
+        pos_clauses = list(dict.fromkeys(pos_clauses))  # 순서 유지하며 중복 제거
+
+        # 그래프에 존재하는 조항으로 하나도 매칭되지 않으면(=참조 법령이 그래프에 없는 경우 등) 건너뛰기
+        if not pos_clauses:
+            skipped_no_match += 1
+            continue
+
         pos_set = set(pos_clauses)
-        
+
         # 3. 질의(Query) 임베딩 및 유사도 계산
         query_emb = encoder.encode([query], convert_to_tensor=True).to(device)
         query_emb = F.normalize(query_emb, p=2, dim=-1)
@@ -254,7 +281,7 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
             "hard_negative_clauses": hard_negatives
         })
         
-    print(f"✅ 총 {len(qa_dataset)}건의 QA 데이터셋 구성 완료!")
+    print(f"✅ 총 {len(qa_dataset)}건의 QA 데이터셋 구성 완료! (그래프에 매칭되는 조항이 없어 제외된 질의: {skipped_no_match}건)")
     return qa_dataset
 
 def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
