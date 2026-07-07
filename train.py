@@ -12,7 +12,7 @@ import random
 from safetensors.torch import save_file
 
 # Recall@K 평가 시 사용할 K 값 목록
-K_VALUES = [1, 3, 5, 10, 20]
+K_VALUES = [1, 3, 5, 10, 15, 30]
 
 # ==========================================
 # 1. InfoNCE Loss (Contrastive Learning) 정의
