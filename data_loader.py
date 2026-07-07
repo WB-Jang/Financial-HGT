@@ -181,13 +181,15 @@ def fsc_dataset_preprocessing(file,nodes_df):
     col_list = ['row','jilui','# of laws_clean','new_johang_clean_split_','full_text_matched','split']
     fsc = fsc[col_list]
     return fsc
-def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda', num_negatives=2):
+def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda', num_negatives=2, precomputed_clause_embs=None):
     """
     BGE-M3 임베딩을 활용하여 질의와 의미적으로 유사하지만 정답이 아닌
     'Hard Negative' 조항들을 추출해 학습용 데이터셋으로 구성합니다.
-    """
-    print("🎯 Hard Negative 추출을 위한 전체 조항 임베딩 생성 중...")
 
+    precomputed_clause_embs: 그래프 구축 단계에서 이미 계산한 조항 임베딩
+        (clause_list와 동일한 순서의 (Num_clauses x 1024) 텐서).
+        전달하면 CPU에서 수십 분 걸리는 전체 조항 재인코딩을 건너뜁니다.
+    """
     # 1. 탐색 대상이 될 전체 조항 리스트와 텍스트 준비
     unique_nodes = nodes_df.dropna(subset=['new_johang']).drop_duplicates(subset=['new_johang'])
     clause_list = unique_nodes['new_johang'].tolist()
@@ -208,15 +210,19 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
             return [key]
         return article_to_paragraph_clauses.get(key, [])
 
-    # 2. 전체 조항 텍스트를 한 번에 임베딩 (GPU 활용 속도 최적화)
-    # convert_to_tensor=True 를 사용하여 PyTorch 텐서로 바로 반환받습니다.
-    clause_embs = encoder.encode(clause_texts, convert_to_tensor=True, show_progress_bar=True).to(device)
-    clause_embs = F.normalize(clause_embs, p=2, dim=-1) # 코사인 유사도를 위한 L2 정규화
+    # 2. 전체 조항 임베딩 준비 (그래프 구축 때 계산한 것이 있으면 재사용)
+    if precomputed_clause_embs is not None and len(precomputed_clause_embs) == len(clause_list):
+        print("🎯 Hard Negative용 조항 임베딩: 그래프 구축 단계 결과 재사용 (재인코딩 생략)")
+        clause_embs = precomputed_clause_embs.to(device)
+    else:
+        print("🎯 Hard Negative 추출을 위한 전체 조항 임베딩 생성 중...")
+        clause_embs = encoder.encode(clause_texts, convert_to_tensor=True, show_progress_bar=True).to(device)
+    clause_embs = F.normalize(clause_embs.float(), p=2, dim=-1) # 코사인 유사도를 위한 L2 정규화
 
-    qa_dataset = []
+    # 3. 유효한 질의 행 수집 (질의 임베딩을 일괄 인코딩하기 위해 먼저 모음)
+    valid_rows = []
     skipped_no_match = 0
 
-    print("🔍 질의별 Hard Negative 매핑 및 데이터셋 조립 중...")
     for _, row in fsc_df.iterrows():
         query = str(row['jilui']).strip()
         pos_clauses_raw = row['new_johang_clean_split_']
@@ -236,36 +242,46 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
             skipped_no_match += 1
             continue
 
+        valid_rows.append((query, pos_clauses, row['# of laws_clean']))
+
+    if not valid_rows:
+        print(f"✅ 총 0건의 QA 데이터셋 구성 완료! (그래프에 매칭되는 조항이 없어 제외된 질의: {skipped_no_match}건)")
+        return []
+
+    # 4. 질의 임베딩 일괄 인코딩 (1건씩 인코딩하는 것보다 훨씬 빠름)
+    print(f"🔍 {len(valid_rows):,}건 질의 임베딩 일괄 인코딩 중...")
+    query_embs = encoder.encode([q for q, _, _ in valid_rows], convert_to_tensor=True, show_progress_bar=True).to(device)
+    query_embs = F.normalize(query_embs.float(), p=2, dim=-1)
+
+    qa_dataset = []
+    print("🔍 질의별 Hard Negative 매핑 및 데이터셋 조립 중...")
+    for qi, (query, pos_clauses, num_laws) in enumerate(valid_rows):
         pos_set = set(pos_clauses)
 
-        # 3. 질의(Query) 임베딩 및 유사도 계산
-        query_emb = encoder.encode([query], convert_to_tensor=True).to(device)
-        query_emb = F.normalize(query_emb, p=2, dim=-1)
-        
         # 내적(Dot product) 연산으로 코사인 유사도 일괄 계산
-        sims = torch.matmul(query_emb, clause_embs.T).squeeze(0) # shape: (num_clauses,)
-        
+        sims = torch.matmul(query_embs[qi].unsqueeze(0), clause_embs.T).squeeze(0) # shape: (num_clauses,)
+
         # 유사도가 높은 순서대로 인덱스 내림차순 정렬
         sorted_indices = torch.argsort(sims, descending=True)
-        
-        # 4. 정답을 제외한 최상위 유사도 조항(Hard Negative) 추출
+
+        # 5. 정답을 제외한 최상위 유사도 조항(Hard Negative) 추출
         hard_negatives_pool = []
         for idx in sorted_indices:
             candidate_clause = clause_list[idx.item()]
-            
+
             # 정답 집합(pos_set)에 없는 조항만 오답 풀에 추가
             if candidate_clause not in pos_set:
                 hard_negatives_pool.append(candidate_clause)
-            
+
             # 필요한 오답 개수를 넉넉히 확보하면 탐색 중단 (시간 단축)
             if len(hard_negatives_pool) >= num_negatives * 2:
                 break
-                
-        # 5. 수집된 Hard Negative 풀에서 가상 노드 형태(List of Lists)로 묶기
+
+        # 6. 수집된 Hard Negative 풀에서 가상 노드 형태(List of Lists)로 묶기
         hard_negatives = []
         for _ in range(num_negatives):
             sample_size = random.choice([1, 2]) # 1개 또는 2개의 조항 묶음
-            
+
             if len(hard_negatives_pool) >= sample_size:
                 # 앞에서부터(유사도가 가장 높은 것부터) 꺼내서 조합
                 neg_sample = [hard_negatives_pool.pop(0) for _ in range(sample_size)]
@@ -273,16 +289,15 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
             else:
                 # 풀이 부족할 경우 방어 코드
                 hard_negatives.append(hard_negatives_pool)
-                
-        # 6. 결과 딕셔너리 조립
-        num_laws = row['# of laws_clean']
+
+        # 7. 결과 딕셔너리 조립
         qa_dataset.append({
             "query": query,
             "positive_clauses": pos_clauses,
             "hard_negative_clauses": hard_negatives,
             "num_laws": int(num_laws) if pd.notna(num_laws) else None
         })
-        
+
     print(f"✅ 총 {len(qa_dataset)}건의 QA 데이터셋 구성 완료! (그래프에 매칭되는 조항이 없어 제외된 질의: {skipped_no_match}건)")
     return qa_dataset
 
@@ -434,9 +449,12 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
     print(f"fsc 질의 분할 완료: train {len(fsc_train)}건 / test {len(fsc_test)}건")
 
+    # 그래프 구축 때 계산한 clause_embs를 재사용해 조항 재인코딩(회당 수십 분)을 생략
+    # (clause_embs는 clause_list = nodes_df['new_johang'].dropna().unique() 순서와 동일하며,
+    #  build 함수 내부의 drop_duplicates('new_johang')도 같은 첫 등장 순서를 사용)
     qa_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    fsc_qa_dataset_train = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_train, nodes_df=nodes_df, encoder=encoder, device=qa_device, num_negatives=3)
-    fsc_qa_dataset_test = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_test, nodes_df=nodes_df, encoder=encoder, device=qa_device, num_negatives=3)
+    fsc_qa_dataset_train = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_train, nodes_df=nodes_df, encoder=encoder, device=qa_device, num_negatives=3, precomputed_clause_embs=clause_embs)
+    fsc_qa_dataset_test = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_test, nodes_df=nodes_df, encoder=encoder, device=qa_device, num_negatives=3, precomputed_clause_embs=clause_embs)
     print(f"fsc 학습용/평가용 데이터 셋 구축 완료")
     return data, clause_to_idx, entity_to_idx, fsc_qa_dataset_train, fsc_qa_dataset_test
     

@@ -17,7 +17,8 @@ class FinancialHGT(nn.Module):
         # 보고서 3장: '정보 집계 (Message Passing)' 구현
         self.convs = nn.ModuleList()
         for _ in range(num_layers):
-            conv = HGTConv(hidden_channels, hidden_channels, metadata, num_heads, group='sum')
+            # group='sum' 인자는 구버전 PyG 전용으로, 최신 torch-geometric에서는 제거됨 (기본 집계가 sum)
+            conv = HGTConv(hidden_channels, hidden_channels, metadata, num_heads)
             self.convs.append(conv)
             
         # 3. 가상 노드(Virtual Node) 집계를 위한 Attention Pooling
