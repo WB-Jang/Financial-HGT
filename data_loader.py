@@ -332,10 +332,8 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
             print(f"    [{done:,}/{len(entity_list):,}] 처리 완료", flush=True)
         entity_embs = torch.cat(entity_embs_list, dim=0)
         print(f"✓ {len(entity_embs):,}개 엔터티 임베딩 계산 완료")
-
-        # 인코더 메모리 정리
-        del encoder
-        torch.cuda.empty_cache()
+        # encoder는 CPU에 있어 VRAM을 차지하지 않으며, 아래 hard negative
+        # 데이터셋 구축(build_fsc_qa_dataset_hard_negative)에서 재사용되므로 유지
 
     # 3. HeteroData 객체 생성 및 노드 피처 할당 (BGE-M3 임베딩을 실제 노드 피처로 사용)
     data = HeteroData()
