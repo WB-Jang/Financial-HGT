@@ -12,6 +12,9 @@ __pycache__/
 *.safetensors
 financial_hgt_model.*
 
+# 학습/평가 실행 시 생기는 결과 파일 (재현 가능한 산출물, git 제외)
+eval_results/
+
 # HuggingFace 모델 캐시 (Windows: C:\Users\<username>\.cache\huggingface\hub\)
 # 로컬에서 다운로드되는 BGE-M3 같은 모델들은 .gitignore 대상 아님 (로컬 전용)
 

@@ -275,10 +275,12 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
                 hard_negatives.append(hard_negatives_pool)
                 
         # 6. 결과 딕셔너리 조립
+        num_laws = row['# of laws_clean']
         qa_dataset.append({
             "query": query,
             "positive_clauses": pos_clauses,
-            "hard_negative_clauses": hard_negatives
+            "hard_negative_clauses": hard_negatives,
+            "num_laws": int(num_laws) if pd.notna(num_laws) else None
         })
         
     print(f"✅ 총 {len(qa_dataset)}건의 QA 데이터셋 구성 완료! (그래프에 매칭되는 조항이 없어 제외된 질의: {skipped_no_match}건)")
