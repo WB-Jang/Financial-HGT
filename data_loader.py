@@ -322,17 +322,19 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     entity_to_idx = {entity: i for i, entity in enumerate(entity_list)}
 
     # 2. BGE-M3 모델을 이용한 초기 텍스트 임베딩 (1024d)
+    # 주의: 처음 실행 시 BGE-M3 모델(약 2.3GB)이 다운로드됨
+    # Windows: C:\Users\<username>\.cache\huggingface\hub\models--BAAI--bge-m3\
+    # Linux/Mac: ~/.cache/huggingface/hub/models--BAAI--bge-m3/
+    # CPU에서 실행하여 VRAM 절약 (8GB GPU의 OOM 방지)
+    # 더미 모드에서도 hard negative 데이터셋 구축에 인코더가 필요하므로 분기 밖에서 생성
+    encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
+
     if use_dummy_emb:
         print("더미 임베딩 사용 (빠른 테스트용)")
         clause_embs = torch.randn((len(clause_list), 1024))
         entity_embs = torch.randn((len(entity_list), 1024))
     else:
         print("BGE-M3 임베딩 추출 중... (시간이 소요될 수 있습니다)")
-        # 주의: 처음 실행 시 BGE-M3 모델(약 2.3GB)이 다운로드됨
-        # Windows: C:\Users\<username>\.cache\huggingface\hub\models--BAAI--bge-m3\
-        # Linux/Mac: ~/.cache/huggingface/hub/models--BAAI--bge-m3/
-        # CPU에서 실행하여 VRAM 절약 (8GB GPU의 OOM 방지)
-        encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
         batch_size_encode = 16  # 더 작은 배치로 메모리 절약
 
         # Clause는 full_text를 인코딩 (배치 처리로 메모리 절약)
@@ -432,8 +434,9 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
     fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
     print(f"fsc 질의 분할 완료: train {len(fsc_train)}건 / test {len(fsc_test)}건")
 
-    fsc_qa_dataset_train = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_train, nodes_df=nodes_df, encoder=encoder, device='cuda', num_negatives=3)
-    fsc_qa_dataset_test = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_test, nodes_df=nodes_df, encoder=encoder, device='cuda', num_negatives=3)
+    qa_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    fsc_qa_dataset_train = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_train, nodes_df=nodes_df, encoder=encoder, device=qa_device, num_negatives=3)
+    fsc_qa_dataset_test = build_fsc_qa_dataset_hard_negative(fsc_df=fsc_test, nodes_df=nodes_df, encoder=encoder, device=qa_device, num_negatives=3)
     print(f"fsc 학습용/평가용 데이터 셋 구축 완료")
     return data, clause_to_idx, entity_to_idx, fsc_qa_dataset_train, fsc_qa_dataset_test
     

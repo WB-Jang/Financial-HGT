@@ -144,54 +144,76 @@ def train():
 
     model.train()
     epochs = 10
+    batch_size_train = 32  # 그래프 forward 1회를 공유하는 질의 수 (미니배치)
 
     for epoch in range(epochs):
-        total_loss = 0
-
-        # 매 Epoch마다 전체 그래프의 노드 임베딩을 한 번 업데이트합니다. (Graph is static)
-        print(f"Epoch {epoch+1}/{epochs} - 그래프 노드 임베딩 계산 중...")
-        updated_node_embs = model(graph_data.x_dict, graph_data.edge_index_dict)
-        clause_embs = updated_node_embs['clause'] # (Num_clauses x 256)
+        total_loss = 0.0
+        trained_queries = 0
         print(f"Epoch {epoch+1}/{epochs} - 학습 중...")
 
-        for i, item in enumerate(fsc_qa_dataset):
+        # 주의: backward()가 계산 그래프를 해제하므로, 그래프 forward를 epoch당 1회만 하고
+        # 여러 질의에서 재사용하면 두 번째 backward에서 RuntimeError가 발생한다.
+        # 미니배치마다 forward를 다시 수행하고 배치 손실을 모아 한 번에 backward한다.
+        for batch_start in range(0, len(fsc_qa_dataset), batch_size_train):
+            batch_items = fsc_qa_dataset[batch_start:batch_start + batch_size_train]
+
             optimizer.zero_grad()
 
-            # (1) Query 벡터화 (사전 계산된 BGE-M3 임베딩 사용)
-            q_emb = query_embs[i].unsqueeze(0)
+            # 현재 파라미터 기준으로 전체 그래프 노드 임베딩 계산 (배치 내 질의들이 공유)
+            updated_node_embs = model(graph_data.x_dict, graph_data.edge_index_dict)
+            clause_embs = updated_node_embs['clause']  # (Num_clauses x 256)
 
-            # (2) Positive Virtual Node 생성
-            pos_indices = [clause_to_idx[c] for c in item["positive_clauses"] if c in clause_to_idx]
-            if not pos_indices:
+            batch_loss = None
+            batch_count = 0
+
+            for j, item in enumerate(batch_items):
+                # (1) Query 벡터화 (사전 계산된 BGE-M3 임베딩 사용)
+                q_emb = query_embs[batch_start + j].unsqueeze(0)
+
+                # (2) Positive Virtual Node 생성
+                pos_indices = [clause_to_idx[c] for c in item["positive_clauses"] if c in clause_to_idx]
+                if not pos_indices:
+                    continue
+                pos_vnode = model.aggregate_virtual_node(clause_embs, pos_indices)
+
+                # (3) Negative Virtual Nodes 생성
+                neg_vnodes_list = []
+                for neg_group in item["hard_negative_clauses"]:
+                    neg_indices = [clause_to_idx[c] for c in neg_group if c in clause_to_idx]
+                    if neg_indices:
+                        neg_vnodes_list.append(model.aggregate_virtual_node(clause_embs, neg_indices))
+
+                if not neg_vnodes_list:
+                    # 하드 네거티브가 없으면 랜덤 샘플링 대체 로직 필요
+                    neg_vnodes_list.append(torch.randn((1, 1024)).to(device))
+
+                neg_vnodes = torch.cat(neg_vnodes_list, dim=0) # (Num_negs x 1024)
+
+                # (4) Loss 누적
+                loss = info_nce_loss(q_emb, pos_vnode, neg_vnodes)
+                batch_loss = loss if batch_loss is None else batch_loss + loss
+                batch_count += 1
+
+            # 배치 내 유효 질의가 없으면 건너뛰기
+            if batch_count == 0:
                 continue
-            pos_vnode = model.aggregate_virtual_node(clause_embs, pos_indices)
 
-            # (3) Negative Virtual Nodes 생성
-            neg_vnodes_list = []
-            for neg_group in item["hard_negative_clauses"]:
-                neg_indices = [clause_to_idx[c] for c in neg_group if c in clause_to_idx]
-                if neg_indices:
-                    neg_vnodes_list.append(model.aggregate_virtual_node(clause_embs, neg_indices))
-
-            if not neg_vnodes_list:
-                # 하드 네거티브가 없으면 랜덤 샘플링 대체 로직 필요
-                neg_vnodes_list.append(torch.randn((1, 1024)).to(device))
-
-            neg_vnodes = torch.cat(neg_vnodes_list, dim=0) # (Num_negs x 1024)
-
-            # (4) Loss 계산 및 역전파
-            loss = info_nce_loss(q_emb, pos_vnode, neg_vnodes)
-            loss.backward()
+            # (5) 배치 평균 Loss로 역전파 및 파라미터 갱신
+            batch_loss = batch_loss / batch_count
+            batch_loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
+            total_loss += batch_loss.item() * batch_count
+            trained_queries += batch_count
 
-            # 메모리 정리 (매 50 스텝마다)
-            if (i + 1) % 50 == 0:
+            # 메모리 정리 및 진행 상황 출력 (매 10 배치마다)
+            batch_num = batch_start // batch_size_train + 1
+            if batch_num % 10 == 0:
                 torch.cuda.empty_cache()
-                print(f"  [{i+1:,}/{len(fsc_qa_dataset):,}] Loss: {total_loss/(i+1):.4f}")
-            
-        print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {total_loss/len(fsc_qa_dataset):.4f}")
+                done = min(batch_start + batch_size_train, len(fsc_qa_dataset))
+                print(f"  [{done:,}/{len(fsc_qa_dataset):,}] Loss: {total_loss/max(trained_queries, 1):.4f}", flush=True)
+
+        print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {total_loss/max(trained_queries, 1):.4f} (학습된 질의: {trained_queries:,}건)")
 
     # ==========================================
     # 5. Safetensors 포맷으로 모델 저장 (프로젝트 폴더 내)
