@@ -1,4 +1,6 @@
 
+import os
+import hashlib
 import pandas as pd
 import numpy as np
 import torch
@@ -7,9 +9,49 @@ import re
 import random
 from torch_geometric.data import HeteroData
 from sentence_transformers import SentenceTransformer
+from safetensors.torch import save_file as st_save_file, load_file as st_load_file
 from tqdm import tqdm
 import openpyxl
 from collections import defaultdict
+
+# 임베딩 캐시 저장 폴더 (프로젝트 루트의 emb_cache/)
+EMB_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'emb_cache')
+
+
+def encode_texts_cached(encoder, texts, cache_name, batch_size=32):
+    """
+    텍스트 리스트를 BGE-M3로 인코딩하되, 결과를 emb_cache/에 safetensors로 저장해두고
+    다음 실행부터 재사용합니다. (CPU 인코딩은 수십 분이 걸리므로 재실행 시 큰 시간 절약)
+
+    캐시 키는 텍스트의 '내용+순서' 전체에 대한 해시입니다.
+    - 데이터 파일이 바뀌어 텍스트가 하나라도 달라지면 해시가 달라져 자동으로 재계산됩니다.
+    - 같은 텍스트 목록이면 (train.py 재실행 포함) 저장된 임베딩을 즉시 로드합니다.
+
+    Returns: (len(texts) x 1024) CPU float32 텐서
+    """
+    hasher = hashlib.md5()
+    for t in texts:
+        hasher.update(str(t).encode('utf-8'))
+        hasher.update(b'\x00')  # 텍스트 경계 구분 (합쳐진 문자열 오인 방지)
+    fingerprint = hasher.hexdigest()[:16]
+
+    os.makedirs(EMB_CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(EMB_CACHE_DIR, f"{cache_name}_{fingerprint}.safetensors")
+
+    if os.path.exists(cache_path):
+        embs = st_load_file(cache_path)['embeddings']
+        print(f"  ♻️ 임베딩 캐시 재사용: {cache_name} ({len(texts):,}건) <- {os.path.basename(cache_path)}", flush=True)
+        return embs
+
+    print(f"  {cache_name}: {len(texts):,}건 인코딩 중... (완료 후 캐시에 저장됩니다)", flush=True)
+    embs = encoder.encode([str(t) for t in texts], batch_size=batch_size,
+                          convert_to_tensor=True, show_progress_bar=True)
+    embs = embs.cpu().float().contiguous()
+    st_save_file({'embeddings': embs}, cache_path)
+    print(f"  💾 임베딩 캐시 저장: {os.path.basename(cache_path)} "
+          f"({os.path.getsize(cache_path) / (1024*1024):.1f} MB)", flush=True)
+    return embs
+
 
 def convert_legal_citation(text):
     if not isinstance(text, str):
@@ -216,7 +258,7 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
         clause_embs = precomputed_clause_embs.to(device)
     else:
         print("🎯 Hard Negative 추출을 위한 전체 조항 임베딩 생성 중...")
-        clause_embs = encoder.encode(clause_texts, convert_to_tensor=True, show_progress_bar=True).to(device)
+        clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs').to(device)
     clause_embs = F.normalize(clause_embs.float(), p=2, dim=-1) # 코사인 유사도를 위한 L2 정규화
 
     # 3. 유효한 질의 행 수집 (질의 임베딩을 일괄 인코딩하기 위해 먼저 모음)
@@ -248,9 +290,9 @@ def build_fsc_qa_dataset_hard_negative(fsc_df, nodes_df, encoder, device='cuda',
         print(f"✅ 총 0건의 QA 데이터셋 구성 완료! (그래프에 매칭되는 조항이 없어 제외된 질의: {skipped_no_match}건)")
         return []
 
-    # 4. 질의 임베딩 일괄 인코딩 (1건씩 인코딩하는 것보다 훨씬 빠름)
-    print(f"🔍 {len(valid_rows):,}건 질의 임베딩 일괄 인코딩 중...")
-    query_embs = encoder.encode([q for q, _, _ in valid_rows], convert_to_tensor=True, show_progress_bar=True).to(device)
+    # 4. 질의 임베딩 일괄 인코딩 + 캐시 (1건씩 인코딩하는 것보다 훨씬 빠름)
+    print(f"🔍 {len(valid_rows):,}건 질의 임베딩 준비 중...")
+    query_embs = encode_texts_cached(encoder, [q for q, _, _ in valid_rows], 'fsc_query_embs').to(device)
     query_embs = F.normalize(query_embs.float(), p=2, dim=-1)
 
     qa_dataset = []
@@ -349,35 +391,17 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
         clause_embs = torch.randn((len(clause_list), 1024))
         entity_embs = torch.randn((len(entity_list), 1024))
     else:
-        print("BGE-M3 임베딩 추출 중... (시간이 소요될 수 있습니다)")
-        batch_size_encode = 16  # 더 작은 배치로 메모리 절약
+        print("BGE-M3 임베딩 추출 중... (캐시가 있으면 즉시 로드, 없으면 인코딩 후 저장)")
 
-        # Clause는 full_text를 인코딩 (배치 처리로 메모리 절약)
-        # dict 매핑으로 O(1) 조회 (기존 nodes_df 반복 필터링은 O(N*M)이라 매우 느림)
+        # Clause는 full_text를 인코딩 - dict 매핑으로 O(1) 조회
         clause_to_text = nodes_df.drop_duplicates('new_johang').set_index('new_johang')['full_text']
         clause_texts = [str(clause_to_text[clause]) for clause in clause_list]
-        print(f"  {len(clause_texts):,}개 조항 텍스트 인코딩 중...", flush=True)
-        clause_embs_list = []
-        for i in range(0, len(clause_texts), batch_size_encode):
-            batch_texts = clause_texts[i:i+batch_size_encode]
-            batch_embs = torch.tensor(encoder.encode(batch_texts, show_progress_bar=False))
-            clause_embs_list.append(batch_embs)
-            done = min(i + batch_size_encode, len(clause_texts))
-            print(f"    [{done:,}/{len(clause_texts):,}] 처리 완료", flush=True)
-        clause_embs = torch.cat(clause_embs_list, dim=0)
-        print(f"✓ {len(clause_embs):,}개 조항 임베딩 계산 완료")
+        clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
+        print(f"✓ {len(clause_embs):,}개 조항 임베딩 준비 완료")
 
-        # Entity는 명칭 자체를 인코딩 (배치 처리로 메모리 절약)
-        print(f"  {len(entity_list):,}개 엔터티 텍스트 인코딩 중...", flush=True)
-        entity_embs_list = []
-        for i in range(0, len(entity_list), batch_size_encode):
-            batch_entities = entity_list[i:i+batch_size_encode]
-            batch_embs = torch.tensor(encoder.encode(batch_entities, show_progress_bar=False))
-            entity_embs_list.append(batch_embs)
-            done = min(i + batch_size_encode, len(entity_list))
-            print(f"    [{done:,}/{len(entity_list):,}] 처리 완료", flush=True)
-        entity_embs = torch.cat(entity_embs_list, dim=0)
-        print(f"✓ {len(entity_embs):,}개 엔터티 임베딩 계산 완료")
+        # Entity는 명칭 자체를 인코딩
+        entity_embs = encode_texts_cached(encoder, entity_list, 'entity_embs')
+        print(f"✓ {len(entity_embs):,}개 엔터티 임베딩 준비 완료")
         # encoder는 CPU에 있어 VRAM을 차지하지 않으며, 아래 hard negative
         # 데이터셋 구축(build_fsc_qa_dataset_hard_negative)에서 재사용되므로 유지
 

@@ -5,7 +5,7 @@ import os
 import json
 import pandas as pd
 from datetime import datetime
-from data_loader import load_and_build_graph
+from data_loader import load_and_build_graph, encode_texts_cached
 from hgt_model import FinancialHGT
 from sentence_transformers import SentenceTransformer
 import random
@@ -108,36 +108,17 @@ def train():
     model = FinancialHGT(metadata=graph_data.metadata(), in_channels=1024, hidden_channels=256).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-    # 4. 질의 임베딩 사전 계산 (배치 처리로 메모리 절약)
-    print(f"질의 임베딩 사전 계산 중... (CPU 인코딩이라 시간이 걸릴 수 있습니다)", flush=True)
+    # 4. 질의 임베딩 사전 계산 (hard negative 단계에서 캐시된 것과 동일한 텍스트라 캐시 적중 시 즉시 로드)
+    print(f"질의 임베딩 사전 계산 중...", flush=True)
     query_texts = [item["query"] for item in fsc_qa_dataset]
-    batch_size_encode = 64  # 더 작은 배치 크기 (메모리 절약)
-    query_embs_list = []
-
-    for i in range(0, len(query_texts), batch_size_encode):
-        batch_texts = query_texts[i:i+batch_size_encode]
-        batch_embs = torch.tensor(text_encoder.encode(batch_texts, show_progress_bar=False))
-        query_embs_list.append(batch_embs)
-        done = min(i + batch_size_encode, len(query_texts))
-        print(f"  [{done:,}/{len(query_texts):,}] 처리 완료", flush=True)
-
-    query_embs = torch.cat(query_embs_list, dim=0).to(device)
-    print(f"✓ {len(query_embs):,}개 질의 임베딩 계산 완료 (배치 크기: {batch_size_encode})")
+    query_embs = encode_texts_cached(text_encoder, query_texts, 'fsc_query_embs').to(device)
+    print(f"✓ {len(query_embs):,}개 질의 임베딩 준비 완료")
 
     # 4-1. Test 질의 임베딩 사전 계산 (Recall@K 평가용, text_encoder 삭제 전에 미리 계산)
     print(f"Test 질의 임베딩 사전 계산 중...", flush=True)
     test_query_texts = [item["query"] for item in fsc_qa_dataset_test]
-    test_query_embs_list = []
-
-    for i in range(0, len(test_query_texts), batch_size_encode):
-        batch_texts = test_query_texts[i:i+batch_size_encode]
-        batch_embs = torch.tensor(text_encoder.encode(batch_texts, show_progress_bar=False))
-        test_query_embs_list.append(batch_embs)
-        done = min(i + batch_size_encode, len(test_query_texts))
-        print(f"  [{done:,}/{len(test_query_texts):,}] 처리 완료", flush=True)
-
-    test_query_embs = torch.cat(test_query_embs_list, dim=0).to(device)
-    print(f"✓ {len(test_query_embs):,}개 test 질의 임베딩 계산 완료")
+    test_query_embs = encode_texts_cached(text_encoder, test_query_texts, 'fsc_query_embs').to(device)
+    print(f"✓ {len(test_query_embs):,}개 test 질의 임베딩 준비 완료")
 
     del text_encoder  # 메모리 정리
     torch.cuda.empty_cache()
