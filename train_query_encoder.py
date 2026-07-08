@@ -135,6 +135,9 @@ def main():
     parser.add_argument("--hard_neg_warmup", type=int, default=10)
     parser.add_argument("--hard_neg_interval", type=int, default=5)
     parser.add_argument("--hard_neg_margin", type=float, default=0.1)
+    parser.add_argument("--clause_emb", default=None,
+                        help="조항 임베딩 safetensors 파일 (예: data/clause_emb_smooth.safetensors). "
+                             "미지정 시 원본 BGE 임베딩(캐시) 사용")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -159,9 +162,15 @@ def main():
     test_items, te_skip = build_retrieval_items(fsc_test, clause_list)
     print(f"조항 노드 {len(clause_list):,}개 | train 질의 {len(train_items)}건(제외 {tr_skip}) | test 질의 {len(test_items)}건(제외 {te_skip})")
 
-    # 2. 임베딩 준비 (전부 캐시 재사용 - Stage 1은 고정 BGE 임베딩)
+    # 2. 임베딩 준비 (전부 캐시 재사용 - Stage 1은 고정 BGE 임베딩 or 평활화 버전)
     encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
-    clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
+    if args.clause_emb:
+        clause_embs = load_file(args.clause_emb)['embeddings']
+        assert clause_embs.size(0) == len(clause_list), \
+            f"조항 임베딩 크기 불일치: {clause_embs.size(0)} != {len(clause_list)} (데이터가 바뀌었으면 build_smoothed_clause_emb.py를 다시 실행하세요)"
+        print(f"조항 임베딩 로드: {args.clause_emb}")
+    else:
+        clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
     train_qemb_all = encode_texts_cached(encoder, [it["query"] for it in train_items], 'fsc_query_embs')
     test_qemb = encode_texts_cached(encoder, [it["query"] for it in test_items], 'fsc_query_embs')
     del encoder

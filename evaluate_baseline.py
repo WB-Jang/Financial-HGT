@@ -20,12 +20,14 @@ evaluate_baseline.py
 
 import os
 import json
+import argparse
 from datetime import datetime
 
 import pandas as pd
 import torch
 import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
+from safetensors.torch import load_file
 
 from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached
 from retrieval_common import (
@@ -38,7 +40,16 @@ FSC_XLSX = './data/for_review_corrected.xlsx'
 
 
 def main():
-    print("=== 순수 BGE-M3 베이스라인 평가 (학습 없음) ===")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--clause_emb", default=None,
+                        help="조항 임베딩 safetensors 파일 (예: data/clause_emb_smooth.safetensors). "
+                             "미지정 시 원본 BGE 임베딩(캐시) 사용")
+    args = parser.parse_args()
+
+    method_name = "pure BGE-M3 cosine (no training)"
+    if args.clause_emb:
+        method_name = f"BGE-M3 cosine + clause emb from {os.path.basename(args.clause_emb)}"
+    print(f"=== 베이스라인 평가 (학습 없음): {method_name} ===")
 
     # 1. 노드 로드 + 조항 키 정규화 (data_loader와 동일)
     nodes_df = pd.read_csv(NODES_CSV)
@@ -65,7 +76,13 @@ def main():
 
     # 4. 임베딩 준비 (emb_cache/ 재사용 - train.py 실행 시 만든 캐시와 동일 파일)
     encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
-    clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
+    if args.clause_emb:
+        clause_embs = load_file(args.clause_emb)['embeddings']
+        assert clause_embs.size(0) == len(clause_list), \
+            f"조항 임베딩 크기 불일치: {clause_embs.size(0)} != {len(clause_list)} (데이터가 바뀌었으면 build_smoothed_clause_emb.py를 다시 실행하세요)"
+        print(f"조항 임베딩 로드: {args.clause_emb}")
+    else:
+        clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
     # 캐시 이름을 hard negative 단계와 동일하게 두어, train.py를 이미 실행했다면 그 캐시가 적중됨
     query_embs = encode_texts_cached(encoder, [it["query"] for it in items], 'fsc_query_embs')
 
@@ -102,7 +119,7 @@ def main():
     with open(summary_json, "w", encoding="utf-8") as f:
         json.dump({
             "timestamp": timestamp,
-            "method": "pure BGE-M3 cosine (no training)",
+            "method": method_name,
             "k_values": K_VALUES,
             "num_test_queries_evaluated": len(eval_df),
             "by_num_laws": by_num_laws.to_dict(orient="records"),
