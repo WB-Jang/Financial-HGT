@@ -467,6 +467,15 @@ def load_and_build_graph(nodes_path, triplets_path, use_dummy_emb=False):
         if len(edges[0]) > 0:
             data['entity', edge_type_name, 'entity'].edge_index = torch.tensor(edges, dtype=torch.long)
 
+    # 4.3 역방향 엣지(Entity -> Clause) 추가
+    # HGTConv는 '도착(destination) 노드'만 매 레이어에서 갱신·유지한다.
+    # clause는 위에서 항상 출발(source)로만 쓰여 도착 노드가 아니므로, 첫 conv 레이어 통과 후
+    # clause 임베딩이 out_dict에서 사라지고, 2번째 레이어가 source로 clause를 찾다가
+    # KeyError: 'clause'로 죽는다. entity -> clause 역방향 엣지를 추가해 clause를 도착 노드로
+    # 만들면(엔터티 정보가 조항으로도 전달됨) 문제가 해결되고 메시지 전달도 양방향이 된다.
+    data['entity', 'rev_has_subject', 'clause'].edge_index = data['clause', 'has_subject', 'entity'].edge_index.flip(0)
+    data['entity', 'rev_has_object', 'clause'].edge_index = data['clause', 'has_object', 'entity'].edge_index.flip(0)
+
     print(f"그래프 구축 완료: {data}")
 
     fsc_train = fsc[fsc['split'] == 'train'].reset_index(drop=True)
