@@ -31,8 +31,6 @@ KG-search_PPR_GNN_Transformer의 build_smoothed_node_emb.py 방식을 Financial-
 """
 
 import argparse
-import re
-from collections import defaultdict
 
 import pandas as pd
 import torch
@@ -41,59 +39,10 @@ from sentence_transformers import SentenceTransformer
 from safetensors.torch import save_file
 
 from data_loader import normalize_johang_key, encode_texts_cached
-from retrieval_common import build_clause_index
+from retrieval_common import build_clause_index, build_clause_adjacency
 
 NODES_CSV = './data/nodes.csv'
 TRIPLETS_CSV = './data/triplets.csv'
-
-
-def build_adjacency(clause_list, triplets_df, max_entity_df, sibling_weight, entity_weight):
-    """(i, j) -> 가중치 딕셔너리 구성 (i < j, 무방향)."""
-    clause_to_idx = {c: i for i, c in enumerate(clause_list)}
-    edge_w = defaultdict(float)
-
-    # 1) 형제 항 (같은 조에 속한 항들)
-    article_groups = defaultdict(list)
-    for key, idx in clause_to_idx.items():
-        article_key = re.sub(r'\s*제\s*\d+\s*항$', '', key).strip()
-        article_groups[article_key].append(idx)
-    n_sibling_pairs = 0
-    for members in article_groups.values():
-        if len(members) < 2:
-            continue
-        for a in range(len(members)):
-            for b in range(a + 1, len(members)):
-                i, j = sorted((members[a], members[b]))
-                edge_w[(i, j)] += sibling_weight
-                n_sibling_pairs += 1
-
-    # 2) 공유 엔터티 (triplets의 subject/object)
-    ent_clauses = defaultdict(set)
-    for _, row in triplets_df.iterrows():
-        ck = row['new_johang']
-        if pd.isna(ck) or ck not in clause_to_idx:
-            continue
-        ci = clause_to_idx[ck]
-        for col in ('subject', 'object'):
-            v = row[col]
-            if pd.notna(v):
-                ent_clauses[str(v)].add(ci)
-
-    n_entity_pairs, n_used_entities = 0, 0
-    for ent, cls in ent_clauses.items():
-        if len(cls) < 2 or len(cls) > max_entity_df:
-            continue  # 단독 언급 or 허브 엔터티 제외
-        n_used_entities += 1
-        members = sorted(cls)
-        for a in range(len(members)):
-            for b in range(a + 1, len(members)):
-                edge_w[(members[a], members[b])] += entity_weight
-                n_entity_pairs += 1
-
-    print(f"인접 구성: 형제 항 쌍 {n_sibling_pairs:,}개, "
-          f"공유 엔터티 쌍 {n_entity_pairs:,}개 (사용 엔터티 {n_used_entities:,}개, df<={max_entity_df})")
-    print(f"고유 엣지: {len(edge_w):,}개")
-    return edge_w
 
 
 def smooth(emb, edge_w, alpha, hops):
@@ -159,9 +108,9 @@ def main():
     clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
     del encoder
 
-    # 3. 인접 구성 + 평활화
-    edge_w = build_adjacency(clause_list, triplets_df,
-                             args.max_entity_df, args.sibling_weight, args.entity_weight)
+    # 3. 인접 구성 + 평활화 (retrieval_common의 공용 인접 빌더 사용)
+    edge_w = build_clause_adjacency(clause_list, triplets_df,
+                                    args.max_entity_df, args.sibling_weight, args.entity_weight)
     smoothed = smooth(clause_embs, edge_w, args.alpha, args.hops)
 
     # 원본과의 평균 코사인 유사도 (얼마나 움직였는지 확인용)
