@@ -22,19 +22,21 @@ def info_nce_loss(query_emb, pos_vnode_emb, neg_vnode_embs, temperature=0.07):
     질의(query)와 정답 가상노드(pos) 간의 유사도는 높이고, 오답(neg)들과의 유사도는 낮춥니다.
     """
     # 벡터 정규화
-    query_emb = F.normalize(query_emb, p=2, dim=-1)
-    pos_vnode_emb = F.normalize(pos_vnode_emb, p=2, dim=-1)
-    neg_vnode_embs = F.normalize(neg_vnode_embs, p=2, dim=-1) # (Num_negs, 1024)
-    
+    query_emb = F.normalize(query_emb, p=2, dim=-1)          # (1, D)
+    pos_vnode_emb = F.normalize(pos_vnode_emb, p=2, dim=-1)  # (1, D)
+    neg_vnode_embs = F.normalize(neg_vnode_embs, p=2, dim=-1)  # (Num_negs, D)
+
     # 유사도 계산 (Dot product after normalization = Cosine Similarity)
-    pos_sim = torch.sum(query_emb * pos_vnode_emb, dim=-1) / temperature # (1,)
-    neg_sims = torch.matmul(query_emb, neg_vnode_embs.T).squeeze() / temperature # (Num_negs,)
-    
+    pos_sim = torch.sum(query_emb * pos_vnode_emb, dim=-1) / temperature  # (1,)
+    # squeeze(0)로 첫 축(질의 축)만 제거 -> Num_negs가 1이어도 0-dim 스칼라가 아닌 (Num_negs,) 유지
+    neg_sims = torch.matmul(query_emb, neg_vnode_embs.T).squeeze(0) / temperature  # (Num_negs,)
+
     # InfoNCE Loss 수식 적용: -log( exp(pos) / (exp(pos) + sum(exp(neg))) )
-    logits = torch.cat([pos_sim.unsqueeze(0), neg_sims.unsqueeze(0) if neg_sims.dim()==0 else neg_sims])
-    labels = torch.zeros(1, dtype=torch.long, device=logits.device) # 정답(positive)은 0번째 인덱스
-    
-    loss = F.cross_entropy(logits.unsqueeze(0), labels)
+    # logits: (1, 1+Num_negs), 정답(positive)은 0번째 인덱스
+    logits = torch.cat([pos_sim, neg_sims], dim=0).unsqueeze(0)  # (1, 1+Num_negs)
+    labels = torch.zeros(1, dtype=torch.long, device=logits.device)
+
+    loss = F.cross_entropy(logits, labels)
     return loss
 
 
