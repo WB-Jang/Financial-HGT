@@ -109,6 +109,25 @@ python evaluate_rerank.py --clause_emb data/clause_emb_smooth.safetensors
 - 임베딩 캐시: `emb_cache/` — 텍스트 내용+순서의 해시가 키라서 데이터가 바뀌면 자동 재계산
 - GPU: 8GB VRAM이면 충분 (인코딩은 CPU, 학습은 행렬곱만이라 가벼움)
 
+### 평가 결과 파일명 규칙 (`eval_results/`)
+
+파일명이 실행 설정을 그대로 드러내므로, 나중에 어떤 조건의 결과인지 파일명만으로 식별된다.
+(`_summary_`는 법률 개수별 요약, `_detailed_`는 질의별 상세. `TS`는 타임스탬프)
+
+| 실행 | 생성 파일 | 의미 |
+|---|---|---|
+| `evaluate_baseline.py` | `baseline_origEmb_summary_TS.csv` | 순수 BGE 베이스라인 |
+| `evaluate_baseline.py --clause_emb ...smooth...` | `baseline_smoothEmb_summary_TS.csv` | BGE + 평활화 (학습 없음) |
+| `train_query_encoder.py` | `stage2_origEmb_summary_TS.csv` | Stage 2 (원본 임베딩) |
+| `train_query_encoder.py --clause_emb ...smooth...` | `stage2_smoothEmb_summary_TS.csv` | Stage 2 (평활화 임베딩) |
+| `evaluate_rerank.py` | `rerank_origEmb_stage2_noppr_{paragraph,article,summary}_TS` | Stage 2, PPR 없음 |
+| `evaluate_rerank.py --ppr --beta 0.5` | `rerank_origEmb_stage2_ppr-b0.5_{...}_TS` | **최종 구성** |
+| `train.py` (레거시) | `hgt_summary_TS.csv` | 구 HGT 전체 학습 |
+
+> 참고: 기존에 이미 생성돼 있던 `baseline_eval_*`, `stage2_eval_*`, `rerank_eval_*`, `test_eval_*`
+> 파일들은 이 규칙 적용 전 산출물이다. `eval_results/`는 git 추적 대상이 아니므로(로컬 전용),
+> 다음 실행부터 위 규칙의 파일명으로 저장된다.
+
 ### 주요 하이퍼파라미터
 
 | 파라미터 | 위치 | 기본값 | 설명 |

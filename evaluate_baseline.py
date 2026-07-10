@@ -32,7 +32,7 @@ from safetensors.torch import load_file
 from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items,
-    compute_metric_rows, summarize_metrics,
+    compute_metric_rows, summarize_metrics, emb_tag,
 )
 
 NODES_CSV = './data/nodes.csv'
@@ -105,14 +105,15 @@ def main():
     print("\n[베이스라인: Hit@K / MRR - KG-search 프로젝트 수치와 비교용]")
     print(summary_df[["num_laws", "num_queries"] + hit_cols + [mrr_col]].to_string(index=False))
 
-    # 6. 결과 저장 (train.py의 eval_results/와 같은 폴더, baseline 접두어)
+    # 6. 결과 저장. 파일명 규칙: baseline_{origEmb|smoothEmb}_{summary|detailed}_{ts}
     eval_dir = os.path.join(os.path.dirname(__file__), "eval_results")
     os.makedirs(eval_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tag = emb_tag(args.clause_emb)
 
-    detailed_csv = os.path.join(eval_dir, f"baseline_eval_detailed_{timestamp}.csv")
-    summary_csv = os.path.join(eval_dir, f"baseline_eval_summary_{timestamp}.csv")
-    summary_json = os.path.join(eval_dir, f"baseline_eval_summary_{timestamp}.json")
+    detailed_csv = os.path.join(eval_dir, f"baseline_{tag}_detailed_{timestamp}.csv")
+    summary_csv = os.path.join(eval_dir, f"baseline_{tag}_summary_{timestamp}.csv")
+    summary_json = os.path.join(eval_dir, f"baseline_{tag}_summary_{timestamp}.json")
 
     eval_df.to_csv(detailed_csv, index=False, encoding="utf-8-sig")
     summary_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")

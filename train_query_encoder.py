@@ -42,7 +42,7 @@ from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_
 from query_encoder import QueryEncoder
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items,
-    compute_metric_rows, summarize_metrics,
+    compute_metric_rows, summarize_metrics, emb_tag,
 )
 
 NODES_CSV = './data/nodes.csv'
@@ -262,15 +262,17 @@ def main():
     print("\n[Stage 2: Hit@K / MRR]")
     print(summary_df[["num_laws", "num_queries"] + hit_cols + [mrr_col]].to_string(index=False))
 
+    # 파일명 규칙: stage2_{origEmb|smoothEmb}_{summary|detailed}_{ts}
     eval_dir = os.path.join(os.path.dirname(__file__), "eval_results")
     os.makedirs(eval_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    eval_df.to_csv(os.path.join(eval_dir, f"stage2_eval_detailed_{ts}.csv"), index=False, encoding="utf-8-sig")
-    summary_df.to_csv(os.path.join(eval_dir, f"stage2_eval_summary_{ts}.csv"), index=False, encoding="utf-8-sig")
-    with open(os.path.join(eval_dir, f"stage2_eval_summary_{ts}.json"), "w", encoding="utf-8") as f:
+    tag = emb_tag(args.clause_emb)
+    eval_df.to_csv(os.path.join(eval_dir, f"stage2_{tag}_detailed_{ts}.csv"), index=False, encoding="utf-8-sig")
+    summary_df.to_csv(os.path.join(eval_dir, f"stage2_{tag}_summary_{ts}.csv"), index=False, encoding="utf-8-sig")
+    with open(os.path.join(eval_dir, f"stage2_{tag}_summary_{ts}.json"), "w", encoding="utf-8") as f:
         json.dump({
             "timestamp": ts,
-            "method": "Stage2 QueryEncoder (frozen BGE clause index)",
+            "method": f"Stage2 QueryEncoder (clause index: {tag})",
             "hyperparams": vars(args),
             "best_val_hit15": best_val,
             "k_values": K_VALUES,
@@ -279,7 +281,7 @@ def main():
             "overall": overall_row,
             "per_query": eval_df.to_dict(orient="records"),
         }, f, ensure_ascii=False, indent=2)
-    print(f"\n✅ Stage 2 평가 저장 완료: eval_results/stage2_eval_summary_{ts}.csv")
+    print(f"\n✅ Stage 2 평가 저장 완료: eval_results/stage2_{tag}_summary_{ts}.csv")
     print("   evaluate_baseline.py 결과와 나란히 비교하세요 - 같은 test 분할, 같은 지표입니다.")
 
 

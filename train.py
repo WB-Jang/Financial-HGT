@@ -248,9 +248,10 @@ def train():
         os.makedirs(eval_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        detailed_csv_path = os.path.join(eval_dir, f"test_eval_detailed_{timestamp}.csv")
-        summary_csv_path = os.path.join(eval_dir, f"test_eval_summary_{timestamp}.csv")
-        summary_json_path = os.path.join(eval_dir, f"test_eval_summary_{timestamp}.json")
+        # 파일명 규칙: hgt_{summary|detailed}_{ts} (레거시 HGT 전체 학습 방식)
+        detailed_csv_path = os.path.join(eval_dir, f"hgt_detailed_{timestamp}.csv")
+        summary_csv_path = os.path.join(eval_dir, f"hgt_summary_{timestamp}.csv")
+        summary_json_path = os.path.join(eval_dir, f"hgt_summary_{timestamp}.json")
 
         eval_df.to_csv(detailed_csv_path, index=False, encoding="utf-8-sig")
         summary_df.to_csv(summary_csv_path, index=False, encoding="utf-8-sig")
