@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--clause_emb", default=None,
                         help="조항 임베딩 safetensors 파일 (예: data/clause_emb_smooth.safetensors). "
                              "미지정 시 원본 BGE 임베딩(캐시) 사용")
+    parser.add_argument("--test_size", type=int, default=100,
+                        help="test 질의 수 (평가가능 질의에서 층화추출). 다른 스크립트와 동일 값 사용 필수")
     args = parser.parse_args()
 
     method_name = "pure BGE-M3 cosine (no training)"
@@ -60,8 +62,8 @@ def main():
         )
     ]
 
-    # 2. fsc 전처리 + train/test 분할 (train.py와 동일한 시드/층화 로직)
-    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df)
+    # 2. fsc 전처리 + train/test 분할 (평가가능 질의에서 층화추출)
+    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df, test_size=args.test_size)
     fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
     print(f"test 질의(분할 기준): {len(fsc_test)}건")
 

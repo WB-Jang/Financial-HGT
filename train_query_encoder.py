@@ -29,6 +29,7 @@ import argparse
 import os
 import json
 import random
+from collections import defaultdict
 from datetime import datetime
 
 import pandas as pd
@@ -41,30 +42,39 @@ from safetensors.torch import save_file, load_file
 from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached
 from query_encoder import QueryEncoder
 from retrieval_common import (
-    K_VALUES, build_clause_index, build_retrieval_items,
+    K_VALUES, build_clause_index, build_retrieval_items, build_clause_adjacency,
     compute_metric_rows, summarize_metrics, emb_tag,
 )
 
 NODES_CSV = './data/nodes.csv'
+TRIPLETS_CSV = './data/triplets.csv'
 FSC_XLSX = './data/for_review_corrected.xlsx'
 
 
 # ── 손실 함수 ────────────────────────────────────────────────────────────────
 
-def infonce_multi_positive(q_emb, clause_embs, pos_idxs_batch, hard_neg_batch, temp, margin):
+def infonce_multi_positive(q_emb, clause_embs, pos_idxs_batch, hard_neg_batch, temp, margin,
+                           neighbor_batch=None):
     """전체 코퍼스 분모의 multi-positive InfoNCE + hard negative margin hinge.
 
     q_emb: (B, D) L2-normalized
     clause_embs: (N, D) L2-normalized (고정)
     pos_idxs_batch: 질의별 정답 인덱스 리스트
     hard_neg_batch: 질의별 hard negative 인덱스 리스트 (빈 리스트면 hinge 생략)
+    neighbor_batch: 질의별 '정답의 그래프 이웃' 인덱스 리스트. 지정 시 분모(logsumexp)에서
+        제외하여 거짓 음성(형제 항/공유 엔터티 조항을 오답으로 벌주는 것)을 방지. (정답은 이미 제외됨)
     """
     sims = q_emb @ clause_embs.T          # (B, N) 코사인 유사도
     logits = sims / temp
 
     loss = q_emb.new_zeros(())
     for i, pos_list in enumerate(pos_idxs_batch):
-        log_denom = torch.logsumexp(logits[i], dim=0)
+        row = logits[i]
+        if neighbor_batch is not None and neighbor_batch[i]:
+            # 이웃 조항을 분모에서 제외 (masked_fill로 -inf -> exp=0)
+            row = row.clone()
+            row[neighbor_batch[i]] = float('-inf')
+        log_denom = torch.logsumexp(row, dim=0)
         log_pos = logits[i][pos_list].mean()
         step_loss = log_denom - log_pos
 
@@ -80,16 +90,18 @@ def infonce_multi_positive(q_emb, clause_embs, pos_idxs_batch, hard_neg_batch, t
 
 @torch.no_grad()
 def mine_hard_negatives(model, train_qemb, clause_embs, samples, k):
-    """현재 모델로 전체 train 질의를 랭킹 -> 상위 비정답을 hard negative로 갱신."""
+    """현재 모델로 전체 train 질의를 랭킹 -> 상위 비정답을 hard negative로 갱신.
+    정답 및 정답의 그래프 이웃(sample['neighbor_set'])은 제외 -> 숨은 정답을 오답으로
+    가르치는 것을 방지."""
     model.eval()
     q_all = model(train_qemb)                       # (n_train, D)
     sims = q_all @ clause_embs.T                    # (n_train, N)
-    fetch = min(k * 4, sims.size(1))
+    fetch = min(k * 8, sims.size(1))                # 이웃 제외로 후보가 줄 수 있어 넉넉히 확보
     top_idx = sims.topk(fetch, dim=1).indices
     for i, sample in enumerate(samples):
-        pos_set = sample["pos_idxs"]
+        forbidden = sample["pos_idxs"] | sample.get("neighbor_set", set())
         sample["hard_neg_idxs"] = [
-            idx.item() for idx in top_idx[i] if idx.item() not in pos_set
+            idx.item() for idx in top_idx[i] if idx.item() not in forbidden
         ][:k]
     model.train()
 
@@ -138,6 +150,13 @@ def main():
     parser.add_argument("--clause_emb", default=None,
                         help="조항 임베딩 safetensors 파일 (예: data/clause_emb_smooth.safetensors). "
                              "미지정 시 원본 BGE 임베딩(캐시) 사용")
+    parser.add_argument("--test_size", type=int, default=100,
+                        help="test 질의 수 (평가가능 질의에서 층화추출). baseline/rerank와 동일 값 사용 필수")
+    parser.add_argument("--exclude_neighbors", type=int, default=1,
+                        help="1이면 정답의 그래프 이웃(형제 항/공유 엔터티 조항)을 hard negative와 "
+                             "InfoNCE 분모에서 제외 (거짓 음성 방지). 0이면 비활성")
+    parser.add_argument("--max_entity_df", type=int, default=20,
+                        help="이웃 그래프 구성 시 허브 엔터티 컷오프 (초과 연결 엔터티 제외)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -153,7 +172,7 @@ def main():
             nodes_df['law_nm'], nodes_df['article_number'], nodes_df['hang_number']
         )
     ]
-    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df)
+    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df, test_size=args.test_size)
     fsc_train = fsc[fsc['split'] == 'train'].reset_index(drop=True)
     fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
 
@@ -192,9 +211,31 @@ def main():
 
     for s in tr_items:
         s["hard_neg_idxs"] = []
-    # pos_idxs를 리스트로도 준비 (텐서 인덱싱용)
-    for s in tr_items:
-        s["pos_list"] = sorted(s["pos_idxs"])
+        s["pos_list"] = sorted(s["pos_idxs"])   # pos_idxs를 리스트로도 (텐서 인덱싱용)
+        s["neighbor_set"] = set()
+        s["neighbor_list"] = []
+
+    # 3-1. (선택) 정답의 그래프 이웃 인덱스 구성 -> hard negative / InfoNCE 분모에서 제외
+    if args.exclude_neighbors:
+        triplets_df = pd.read_csv(TRIPLETS_CSV)
+        triplets_df['new_johang'] = [
+            normalize_johang_key(law_nm, article_number)
+            for law_nm, article_number in zip(triplets_df['law_nm'], triplets_df['article_number'])
+        ]
+        edge_w = build_clause_adjacency(clause_list, triplets_df, args.max_entity_df)
+        neighbors = defaultdict(set)
+        for (i, j) in edge_w:
+            neighbors[i].add(j)
+            neighbors[j].add(i)
+        for s in tr_items:
+            nbr = set()
+            for p in s["pos_idxs"]:
+                nbr |= neighbors.get(p, set())
+            nbr -= s["pos_idxs"]                 # 정답은 이웃 목록에서 제외 (분모에 남아야 함)
+            s["neighbor_set"] = nbr
+            s["neighbor_list"] = sorted(nbr)
+        avg_nbr = sum(len(s["neighbor_list"]) for s in tr_items) / max(len(tr_items), 1)
+        print(f"이웃 제외 활성: 질의당 평균 제외 조항 {avg_nbr:.1f}개")
 
     # 4. 모델/옵티마이저 (학습 대상은 QueryEncoder 하나뿐)
     model = QueryEncoder(dim=clause_embs.size(1)).to(device)
@@ -227,9 +268,10 @@ def main():
             q = model(tr_qemb[batch_ids])
             pos_batch = [tr_items[i]["pos_list"] for i in batch_ids]
             hard_batch = [tr_items[i]["hard_neg_idxs"] for i in batch_ids]
+            nbr_batch = [tr_items[i]["neighbor_list"] for i in batch_ids] if args.exclude_neighbors else None
 
             loss = infonce_multi_positive(q, clause_embs, pos_batch, hard_batch,
-                                          args.temp, args.hard_neg_margin)
+                                          args.temp, args.hard_neg_margin, neighbor_batch=nbr_batch)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)

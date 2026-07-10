@@ -87,6 +87,8 @@ def main():
     parser.add_argument("--iters", type=int, default=10, help="PPR 전파 반복 수")
     parser.add_argument("--seeds", type=int, default=20, help="PPR 시드 조항 수")
     parser.add_argument("--max_entity_df", type=int, default=20)
+    parser.add_argument("--test_size", type=int, default=100,
+                        help="test 질의 수 (평가가능 질의에서 층화추출). 다른 스크립트와 동일 값 사용 필수")
     args = parser.parse_args()
 
     method_parts = []
@@ -106,7 +108,7 @@ def main():
             nodes_df['law_nm'], nodes_df['article_number'], nodes_df['hang_number']
         )
     ]
-    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df)
+    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df, test_size=args.test_size)
     fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
 
     clause_list, clause_texts = build_clause_index(nodes_df)

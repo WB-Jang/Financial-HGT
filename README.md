@@ -135,9 +135,22 @@ python evaluate_rerank.py --clause_emb data/clause_emb_smooth.safetensors
 | `--epochs` | train_query_encoder | 100 | 학습 epoch |
 | `--temp` | train_query_encoder | 0.1 | InfoNCE 온도 |
 | `--hard_neg_k` | train_query_encoder | 10 | 질의당 hard negative 수 (0=비활성) |
+| `--exclude_neighbors` | train_query_encoder | 1 | 정답의 그래프 이웃을 hard negative·InfoNCE 분모에서 제외(거짓 음성 방지) |
+| `--test_size` | 공통(baseline/stage2/rerank) | 100 | test 질의 수. **세 스크립트에 같은 값 필수** |
 | `--beta` | evaluate_rerank | 0.3 (권장 0.5) | PPR 점수 혼합 비중 |
 | `--seeds` | evaluate_rerank | 20 | PPR 시드 조항 수 |
 | `--max_entity_df` | 공통 | 20 | 허브 엔터티 컷오프 (초과 연결 엔터티 제외) |
+
+### 평가셋 구성 및 거짓 음성 처리 (데이터 품질 개선)
+
+- **평가가능 질의 기준 층화추출**: test 표본을 "정답이 그래프에 존재하는(평가가능)" 질의에서만
+  뽑는다. `--test_size N`이 곧 평가가능 test 질의 수가 되어(기존에는 100건 추출 후 26건이
+  평가불가로 버려짐) 목표 크기를 정확히 통제한다. 통계적 유의성을 위해 `--test_size 300` 권장
+  (n=74에서 95% CI ±0.10 → n=300에서 ±0.05).
+- **거짓 음성(false negative) 제외**: 정답 조항의 그래프 이웃(형제 항·공유 엔터티 조항)은 실제로
+  관련 조항일 확률이 높으므로, hard negative 채굴과 InfoNCE 분모에서 제외한다(`--exclude_neighbors 1`).
+- 주의: 위 두 변경은 **test 분할 자체를 바꾸므로 이전 실행 수치와 직접 비교 불가**. baseline·stage2·rerank를
+  모두 같은 `--test_size`로 다시 실행해 재-베이스라인해야 한다.
 
 ---
 
