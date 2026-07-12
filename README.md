@@ -87,46 +87,86 @@ pip install -r requirements.txt
 
 필요 데이터 (`data/`): `nodes.csv`, `triplets.csv`, `for_review_corrected.xlsx`
 
-### 파이프라인
+### 실험 재현 — 이 순서대로 실행 (모두 `--test_size 300` 고정)
+
+아래 순서대로 실행하면, 각 명령이 설정을 드러내는 이름의 결과 파일 하나씩을 `eval_results/`에
+남긴다. `--test_size`는 **모든 명령에서 동일(300)** 해야 test 분할이 같아 비교가 성립한다.
+(GPU가 있으면 임베딩이 자동으로 GPU에서 계산된다. 데이터가 바뀌면 STEP 1에서 캐시가 자동 재생성됨)
 
 ```bash
-# 1. Stage 2 학습 (첫 실행 시 BGE-M3 다운로드 ~2.3GB + 조항 임베딩 인코딩 후 캐시.
-#    이후 실행은 emb_cache/ 재사용으로 수 분 내 완료. 학습 후 test 평가 자동 수행)
-python train_query_encoder.py
+# ── STEP 1. Stage 2 학습 (최종 운영 모델) ───────────────────────────────────
+#   첫 실행: BGE-M3 다운로드(~2.3GB) + 조항 9천여개 GPU 인코딩 후 emb_cache/에 저장.
+#   이후 실행은 캐시 재사용으로 수 분. 끝나면 test 지표(항 단위)를 스스로 출력.
+python train_query_encoder.py --test_size 300
+#   → query_encoder_best.safetensors  (이후 STEP 3~ 에서 사용)
+#   → eval_results/stage2_origEmb_summary_*.csv
 
-# 2. 최종 평가 (PPR 재랭킹 포함, 항 단위 + 조 단위 지표)
-python evaluate_rerank.py --ppr --beta 0.5
+# ── STEP 2. 베이스라인 (학습 없음, 순수 BGE dense) ──────────────────────────
+python evaluate_rerank.py --no_query_encoder --test_size 300
+#   → rerank_origEmb_bgeq_dense_none_*        [A] 아무것도 안 한 바닥선
 
-# 참고: 베이스라인 측정 (학습 없음)
-python evaluate_baseline.py
+# ── STEP 3. Stage 2, dense, 재랭킹 없음 ─────────────────────────────────────
+python evaluate_rerank.py --test_size 300
+#   → rerank_origEmb_stage2_dense_none_*      [B] 학습 효과 (A 대비)
 
-# 참고: 그래프 평활화 임베딩 실험 (최종 구성에는 미사용)
-python build_smoothed_clause_emb.py
-python evaluate_rerank.py --clause_emb data/clause_emb_smooth.safetensors
+# ── STEP 4. + PPR 그래프 재랭킹 ─────────────────────────────────────────────
+python evaluate_rerank.py --rerank ppr --beta 0.5 --test_size 300
+#   → rerank_origEmb_stage2_dense_ppr-b0.5_*  [C] 그래프 구조 주입 효과 (B 대비)
+
+# ── STEP 5. + Cross-encoder 재랭킹 (1순위 신규) ─────────────────────────────
+#   첫 실행 시 BGE-reranker-v2-m3(~2.3GB) 다운로드. 상위 50개만 재랭킹.
+python evaluate_rerank.py --rerank cross --test_size 300
+#   → rerank_origEmb_stage2_dense_cross-k50_* [D] 의미 재랭킹 효과 (B, C 대비)
+
+# ── STEP 6. Dense+BM25 하이브리드 (2순위 신규) ──────────────────────────────
+python evaluate_rerank.py --hybrid --test_size 300
+#   → rerank_origEmb_stage2_hybrid_none_*     [E] 어휘 신호 효과 (B 대비)
+
+# ── STEP 7. 하이브리드 + Cross-encoder (스택 최강 후보) ─────────────────────
+python evaluate_rerank.py --hybrid --rerank cross --test_size 300
+#   → rerank_origEmb_stage2_hybrid_cross-k50_* [F] 최종 조합
+
+# ── STEP 8. 애블레이션: 이웃 제외 on/off (3순위) ────────────────────────────
+#   기본(STEP 1)은 이웃 제외 ON. OFF 모델을 다른 이름으로 학습해 끝의 test 표를 비교.
+python train_query_encoder.py --test_size 300 --exclude_neighbors 0 --ckpt query_encoder_noNbr.safetensors
+#   두 학습의 마지막 "[Stage 2 ...]" 표를 직접 비교 (ON=STEP1 vs OFF=여기)
 ```
+
+읽는 법: `[A]→[B]` 학습 효과, `[B]→[C]` 그래프(PPR), `[B]→[D]` cross-encoder,
+`[B]→[E]` 어휘(하이브리드), `[F]` 최종 스택. 각 파일의 **조 단위** 표가 프로젝트 간 비교용,
+**항 단위** 표가 기존 실험과의 연속 비교용이다.
+
+> 평활화(선택): `python build_smoothed_clause_emb.py` 후 위 명령들에 `--clause_emb
+> data/clause_emb_smooth.safetensors`를 붙이면 된다(파일명이 `smoothEmb`로 바뀜). 단, Stage 2와
+> 결합 시 이득이 사라진다는 이전 결과가 있어 우선순위는 낮다.
 
 - 산출물: `query_encoder_best.safetensors` (모델), `eval_results/*.csv|json` (평가 기록)
 - 임베딩 캐시: `emb_cache/` — 텍스트 내용+순서의 해시가 키라서 데이터가 바뀌면 자동 재계산
-- GPU: 8GB VRAM이면 충분 (인코딩은 CPU, 학습은 행렬곱만이라 가벼움)
+- GPU: 8GB VRAM이면 충분 (임베딩·cross-encoder는 GPU에서 순차 실행 후 즉시 해제)
 
 ### 평가 결과 파일명 규칙 (`eval_results/`)
 
-파일명이 실행 설정을 그대로 드러내므로, 나중에 어떤 조건의 결과인지 파일명만으로 식별된다.
-(`_summary_`는 법률 개수별 요약, `_detailed_`는 질의별 상세. `TS`는 타임스탬프)
+파일명이 실행 설정을 그대로 드러내므로, 파일명만으로 어떤 조건의 결과인지 식별된다.
+`evaluate_rerank.py`의 파일명 형식:
 
-| 실행 | 생성 파일 | 의미 |
-|---|---|---|
-| `evaluate_baseline.py` | `baseline_origEmb_summary_TS.csv` | 순수 BGE 베이스라인 |
-| `evaluate_baseline.py --clause_emb ...smooth...` | `baseline_smoothEmb_summary_TS.csv` | BGE + 평활화 (학습 없음) |
-| `train_query_encoder.py` | `stage2_origEmb_summary_TS.csv` | Stage 2 (원본 임베딩) |
-| `train_query_encoder.py --clause_emb ...smooth...` | `stage2_smoothEmb_summary_TS.csv` | Stage 2 (평활화 임베딩) |
-| `evaluate_rerank.py` | `rerank_origEmb_stage2_noppr_{paragraph,article,summary}_TS` | Stage 2, PPR 없음 |
-| `evaluate_rerank.py --ppr --beta 0.5` | `rerank_origEmb_stage2_ppr-b0.5_{...}_TS` | **최종 구성** |
-| `train.py` (레거시) | `hgt_summary_TS.csv` | 구 HGT 전체 학습 |
+```
+rerank_{origEmb|smoothEmb}_{stage2|bgeq}_{dense|hybrid}_{none|ppr-b0.5|cross-k50}_{paragraph|article|summary}_TS
+       └ 조항임베딩          └ 질의인코딩     └ 기본검색       └ 재랭킹방식               └ 지표세밀도
+```
 
-> 참고: 기존에 이미 생성돼 있던 `baseline_eval_*`, `stage2_eval_*`, `rerank_eval_*`, `test_eval_*`
-> 파일들은 이 규칙 적용 전 산출물이다. `eval_results/`는 git 추적 대상이 아니므로(로컬 전용),
-> 다음 실행부터 위 규칙의 파일명으로 저장된다.
+| 실행 | 생성 파일 (핵심 부분) |
+|---|---|
+| `evaluate_rerank.py --no_query_encoder` | `rerank_origEmb_bgeq_dense_none_*` (베이스라인) |
+| `evaluate_rerank.py` | `rerank_origEmb_stage2_dense_none_*` |
+| `evaluate_rerank.py --rerank ppr --beta 0.5` | `rerank_origEmb_stage2_dense_ppr-b0.5_*` |
+| `evaluate_rerank.py --rerank cross` | `rerank_origEmb_stage2_dense_cross-k50_*` |
+| `evaluate_rerank.py --hybrid` | `rerank_origEmb_stage2_hybrid_none_*` |
+| `evaluate_rerank.py --hybrid --rerank cross` | `rerank_origEmb_stage2_hybrid_cross-k50_*` |
+| `train_query_encoder.py` | `stage2_origEmb_summary_*` (학습 시 자체 평가) |
+| `evaluate_baseline.py` | `baseline_origEmb_summary_*` |
+
+각 rerank 실행은 `_paragraph_`, `_article_` CSV와 `_summary_` JSON을 함께 남긴다.
+`eval_results/`는 git 추적 대상이 아니므로(로컬 전용) 규칙 적용 전 옛 파일은 그대로 남는다.
 
 ### 주요 하이퍼파라미터
 
@@ -136,10 +176,24 @@ python evaluate_rerank.py --clause_emb data/clause_emb_smooth.safetensors
 | `--temp` | train_query_encoder | 0.1 | InfoNCE 온도 |
 | `--hard_neg_k` | train_query_encoder | 10 | 질의당 hard negative 수 (0=비활성) |
 | `--exclude_neighbors` | train_query_encoder | 1 | 정답의 그래프 이웃을 hard negative·InfoNCE 분모에서 제외(거짓 음성 방지) |
-| `--test_size` | 공통(baseline/stage2/rerank) | 100 | test 질의 수. **세 스크립트에 같은 값 필수** |
+| `--ckpt` | train_query_encoder | query_encoder_best.safetensors | 모델 저장 파일명 (애블레이션 시 다른 이름) |
+| `--test_size` | 공통(baseline/stage2/rerank) | 100 | test 질의 수. **모든 스크립트에 같은 값 필수** |
+| `--rerank` | evaluate_rerank | none | 재랭킹: none / ppr(그래프) / cross(cross-encoder) |
+| `--hybrid` | evaluate_rerank | off | dense + BM25 어휘 하이브리드(RRF 융합) |
 | `--beta` | evaluate_rerank | 0.3 (권장 0.5) | PPR 점수 혼합 비중 |
+| `--rerank_topk` | evaluate_rerank | 50 | cross-encoder 재랭킹 후보 수 |
 | `--seeds` | evaluate_rerank | 20 | PPR 시드 조항 수 |
 | `--max_entity_df` | 공통 | 20 | 허브 엔터티 컷오프 (초과 연결 엔터티 제외) |
+
+### 재랭킹·하이브리드 아키텍처 (성능 평가 축)
+
+- **Cross-encoder 재랭킹** (`--rerank cross`): bi-encoder가 뽑은 상위 K개를 (질의,조항) 쌍으로
+  BGE-reranker-v2-m3에 넣어 정밀 재정렬. 학습 불필요, 상위 K만 처리해 저렴. 재랭킹 중 기대효과 최대.
+- **Dense+BM25 하이브리드** (`--hybrid`): BGE dense 랭킹과 BM25 어휘 랭킹을 RRF로 융합.
+  법률 텍스트의 정확한 용어/조문번호 일치를 dense가 놓칠 때 보완. BM25는 의존성 없이 내장 구현
+  (한글 2-gram 토크나이저).
+- **exclude_neighbors 애블레이션**: `--exclude_neighbors 0` 학습본과 기본(1) 학습본의 최종 test 표를
+  비교해 거짓 음성 제거의 실제 효과를 측정.
 
 ### 평가셋 구성 및 거짓 음성 처리 (데이터 품질 개선)
 

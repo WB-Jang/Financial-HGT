@@ -35,10 +35,9 @@ import argparse
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from sentence_transformers import SentenceTransformer
 from safetensors.torch import save_file
 
-from data_loader import normalize_johang_key, encode_texts_cached
+from data_loader import normalize_johang_key, encode_texts_cached, make_bge_encoder
 from retrieval_common import build_clause_index, build_clause_adjacency
 
 NODES_CSV = './data/nodes.csv'
@@ -104,7 +103,7 @@ def main():
     ]
 
     # 2. 원본 BGE 임베딩 (캐시 재사용)
-    encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
+    encoder = make_bge_encoder()
     clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
     del encoder
 

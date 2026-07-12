@@ -18,14 +18,28 @@ from collections import defaultdict
 EMB_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'emb_cache')
 
 
-def encode_texts_cached(encoder, texts, cache_name, batch_size=32):
+def make_bge_encoder(prefer_gpu=True):
+    """BGE-M3 SentenceTransformer 인코더를 생성한다.
+
+    GPU가 있으면 GPU에 올려 인코딩 속도를 크게 높인다(첫 실행 시 조항 9천여 개 인코딩이
+    CPU로는 수십 분 걸림). 인코딩은 이후 학습/재랭커 모델을 GPU에 올리기 '전에' 끝내고
+    호출부에서 인코더를 즉시 해제(del + empty_cache)하므로 8GB VRAM에서도 안전하다.
+    """
+    device = 'cuda' if (prefer_gpu and torch.cuda.is_available()) else 'cpu'
+    print(f"  BGE-M3 인코더 로드 (device={device})", flush=True)
+    return SentenceTransformer('BAAI/bge-m3', device=device)
+
+
+def encode_texts_cached(encoder, texts, cache_name, batch_size=None):
     """
     텍스트 리스트를 BGE-M3로 인코딩하되, 결과를 emb_cache/에 safetensors로 저장해두고
-    다음 실행부터 재사용합니다. (CPU 인코딩은 수십 분이 걸리므로 재실행 시 큰 시간 절약)
+    다음 실행부터 재사용합니다. (첫 인코딩은 시간이 걸리므로 재실행 시 큰 시간 절약)
 
     캐시 키는 텍스트의 '내용+순서' 전체에 대한 해시입니다.
     - 데이터 파일이 바뀌어 텍스트가 하나라도 달라지면 해시가 달라져 자동으로 재계산됩니다.
-    - 같은 텍스트 목록이면 (train.py 재실행 포함) 저장된 임베딩을 즉시 로드합니다.
+    - 같은 텍스트 목록이면 (재실행 포함) 저장된 임베딩을 즉시 로드합니다.
+
+    batch_size: None이면 인코더 device에 맞춰 자동 선택 (GPU=12로 8GB VRAM 안전, CPU=64).
 
     Returns: (len(texts) x 1024) CPU float32 텐서
     """
@@ -43,10 +57,15 @@ def encode_texts_cached(encoder, texts, cache_name, batch_size=32):
         print(f"  ♻️ 임베딩 캐시 재사용: {cache_name} ({len(texts):,}건) <- {os.path.basename(cache_path)}", flush=True)
         return embs
 
-    print(f"  {cache_name}: {len(texts):,}건 인코딩 중... (완료 후 캐시에 저장됩니다)", flush=True)
+    if batch_size is None:
+        on_gpu = str(getattr(encoder, 'device', 'cpu')).startswith('cuda')
+        batch_size = 12 if on_gpu else 64   # GPU는 512토큰 x 배치가 8GB에 맞도록 보수적으로
+    print(f"  {cache_name}: {len(texts):,}건 인코딩 중... (batch={batch_size}, 완료 후 캐시에 저장)", flush=True)
     embs = encoder.encode([str(t) for t in texts], batch_size=batch_size,
                           convert_to_tensor=True, show_progress_bar=True)
     embs = embs.cpu().float().contiguous()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     st_save_file({'embeddings': embs}, cache_path)
     print(f"  💾 임베딩 캐시 저장: {os.path.basename(cache_path)} "
           f"({os.path.getsize(cache_path) / (1024*1024):.1f} MB)", flush=True)

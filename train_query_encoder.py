@@ -36,10 +36,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sentence_transformers import SentenceTransformer
 from safetensors.torch import save_file, load_file
 
-from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached
+from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached, make_bge_encoder
 from query_encoder import QueryEncoder
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items, build_clause_adjacency,
@@ -157,6 +156,8 @@ def main():
                              "InfoNCE 분모에서 제외 (거짓 음성 방지). 0이면 비활성")
     parser.add_argument("--max_entity_df", type=int, default=20,
                         help="이웃 그래프 구성 시 허브 엔터티 컷오프 (초과 연결 엔터티 제외)")
+    parser.add_argument("--ckpt", default="query_encoder_best.safetensors",
+                        help="학습된 QueryEncoder 저장 파일명 (애블레이션 시 다른 이름으로 지정해 덮어쓰기 방지)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -182,7 +183,7 @@ def main():
     print(f"조항 노드 {len(clause_list):,}개 | train 질의 {len(train_items)}건(제외 {tr_skip}) | test 질의 {len(test_items)}건(제외 {te_skip})")
 
     # 2. 임베딩 준비 (전부 캐시 재사용 - Stage 1은 고정 BGE 임베딩 or 평활화 버전)
-    encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
+    encoder = make_bge_encoder()
     if args.clause_emb:
         clause_embs = load_file(args.clause_emb)['embeddings']
         assert clause_embs.size(0) == len(clause_list), \
@@ -246,7 +247,7 @@ def main():
     hit15, rec15 = quick_val_metrics(model, val_qemb, clause_embs, val_items)
     print(f"[epoch 0 = 베이스라인] val Hit@15={hit15:.3f} Recall@15={rec15:.3f}")
 
-    ckpt_path = os.path.join(os.path.dirname(__file__), "query_encoder_best.safetensors")
+    ckpt_path = os.path.join(os.path.dirname(__file__), args.ckpt)
     best_val = hit15  # 시작점(베이스라인)보다 나빠진 모델은 저장하지 않음
     save_file({k: v.contiguous() for k, v in model.state_dict().items()}, ckpt_path)
 

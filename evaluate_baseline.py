@@ -26,10 +26,9 @@ from datetime import datetime
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from sentence_transformers import SentenceTransformer
 from safetensors.torch import load_file
 
-from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached
+from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached, make_bge_encoder
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items,
     compute_metric_rows, summarize_metrics, emb_tag,
@@ -77,7 +76,7 @@ def main():
         return
 
     # 4. 임베딩 준비 (emb_cache/ 재사용 - train.py 실행 시 만든 캐시와 동일 파일)
-    encoder = SentenceTransformer('BAAI/bge-m3', device='cpu')
+    encoder = make_bge_encoder()
     if args.clause_emb:
         clause_embs = load_file(args.clause_emb)['embeddings']
         assert clause_embs.size(0) == len(clause_list), \
