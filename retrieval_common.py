@@ -95,6 +95,12 @@ def article_key_of(clause_key):
     return re.sub(r'\s*제\s*\d+\s*항$', '', clause_key).strip()
 
 
+def law_of(clause_key):
+    """조항 키에서 법령명 추출: '자본시장법 시행령 제119조 제1항' -> '자본시장법 시행령'"""
+    m = re.search(r'\s*제\s*\d', clause_key)
+    return clause_key[:m.start()].strip() if m else clause_key.strip()
+
+
 def build_clause_adjacency(clause_list, triplets_df, max_entity_df=20,
                            sibling_weight=1.0, entity_weight=1.0, verbose=True):
     """조항 사이의 무방향 가중 인접 그래프 구성. (i, j) -> weight 딕셔너리 (i < j).
