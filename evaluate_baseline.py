@@ -32,7 +32,7 @@ from safetensors.torch import load_file
 from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_texts_cached
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items,
-    compute_metric_rows, summarize_metrics,
+    compute_metric_rows, summarize_metrics, emb_tag,
 )
 
 NODES_CSV = './data/nodes.csv'
@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--clause_emb", default=None,
                         help="조항 임베딩 safetensors 파일 (예: data/clause_emb_smooth.safetensors). "
                              "미지정 시 원본 BGE 임베딩(캐시) 사용")
+    parser.add_argument("--test_size", type=int, default=100,
+                        help="test 질의 수 (평가가능 질의에서 층화추출). 다른 스크립트와 동일 값 사용 필수")
     args = parser.parse_args()
 
     method_name = "pure BGE-M3 cosine (no training)"
@@ -60,8 +62,8 @@ def main():
         )
     ]
 
-    # 2. fsc 전처리 + train/test 분할 (train.py와 동일한 시드/층화 로직)
-    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df)
+    # 2. fsc 전처리 + train/test 분할 (평가가능 질의에서 층화추출)
+    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df, test_size=args.test_size)
     fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
     print(f"test 질의(분할 기준): {len(fsc_test)}건")
 
@@ -105,14 +107,15 @@ def main():
     print("\n[베이스라인: Hit@K / MRR - KG-search 프로젝트 수치와 비교용]")
     print(summary_df[["num_laws", "num_queries"] + hit_cols + [mrr_col]].to_string(index=False))
 
-    # 6. 결과 저장 (train.py의 eval_results/와 같은 폴더, baseline 접두어)
+    # 6. 결과 저장. 파일명 규칙: baseline_{origEmb|smoothEmb}_{summary|detailed}_{ts}
     eval_dir = os.path.join(os.path.dirname(__file__), "eval_results")
     os.makedirs(eval_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tag = emb_tag(args.clause_emb)
 
-    detailed_csv = os.path.join(eval_dir, f"baseline_eval_detailed_{timestamp}.csv")
-    summary_csv = os.path.join(eval_dir, f"baseline_eval_summary_{timestamp}.csv")
-    summary_json = os.path.join(eval_dir, f"baseline_eval_summary_{timestamp}.json")
+    detailed_csv = os.path.join(eval_dir, f"baseline_{tag}_detailed_{timestamp}.csv")
+    summary_csv = os.path.join(eval_dir, f"baseline_{tag}_summary_{timestamp}.csv")
+    summary_json = os.path.join(eval_dir, f"baseline_{tag}_summary_{timestamp}.json")
 
     eval_df.to_csv(detailed_csv, index=False, encoding="utf-8-sig")
     summary_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")

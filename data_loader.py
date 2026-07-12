@@ -114,18 +114,26 @@ def normalize_johang_key(law_nm, article_raw, hang_num=None):
     return ' '.join(p for p in [law_nm, jo, hang] if p)
 
 
-def split_fsc_train_test(fsc, test_size=100, random_state=42, strata_col='# of laws_clean', query_col='jilui'):
+def split_fsc_train_test(fsc, test_size=100, random_state=42, strata_col='# of laws_clean',
+                         query_col='jilui', eligible_query_set=None):
     """
     질의(jilui) 단위로 층화추출을 수행하여 fsc 데이터프레임에 'split'('train'/'test') 컬럼을 부여합니다.
     strata_col(참조 법률 수) 값의 분포 비율을 test set에서도 유지하고,
     동일 질의가 중복 행으로 여러 번 등장하더라도 train/test에 동시에 섞이지 않도록(leakage 방지)
     질의 단위로 먼저 중복을 제거한 뒤 표본을 추출합니다.
+
+    eligible_query_set: 지정 시 test 표본을 이 집합(=그래프에 정답이 존재하는 '평가가능' 질의)
+        안에서만 추출한다. 그러면 test_size가 곧 '평가가능 test 질의 수'가 되어(기존에는 100건
+        추출 후 26건이 평가불가로 버려짐), 목표 크기를 정확히 통제할 수 있고 층화 비율도
+        평가가능 질의 분포를 반영한다. train에는 평가불가 질의도 남지만 이후 단계에서 자동 제외된다.
     """
     rng = np.random.default_rng(random_state)
     fsc = fsc.copy()
     fsc['split'] = 'train'
 
     unique_queries = fsc.drop_duplicates(subset=query_col)[[query_col, strata_col]]
+    if eligible_query_set is not None:
+        unique_queries = unique_queries[unique_queries[query_col].isin(eligible_query_set)]
     total = len(unique_queries)
 
     # 층(stratum)별 목표 test 표본 수를 비율대로 배분하고,
@@ -152,7 +160,7 @@ def split_fsc_train_test(fsc, test_size=100, random_state=42, strata_col='# of l
     return fsc
 
 
-def fsc_dataset_preprocessing(file,nodes_df):
+def fsc_dataset_preprocessing(file, nodes_df, test_size=100):
     raw_file = pd.read_excel(file, sheet_name=['법령O+조항O'])
     fsc = raw_file['법령O+조항O']
     fsc['new_johang_clean_split'] = fsc['new_johang_clean'].str.split('|')
@@ -218,7 +226,29 @@ def fsc_dataset_preprocessing(file,nodes_df):
     # 3. df1에 적용하여 새로운 컬럼 생성
     fsc['full_text_matched'] = fsc['new_johang_clean_split_'].apply(fetch_full_texts)
 
-    fsc = split_fsc_train_test(fsc, test_size=100, strata_col='# of laws_clean', query_col='jilui')
+    # 4. '평가가능' 여부 판정: 정답 조항(항 단위 지정 or 조 단위 확장)이 그래프에 하나라도 존재하는가.
+    #    text_mapping_dict(정확 매칭) 또는 article_match_dict(조->항 확장)에 걸리면 평가가능.
+    #    (retrieval_common.build_retrieval_items의 매칭 규칙과 동일)
+    def _is_evaluable(key_list):
+        if not isinstance(key_list, list):
+            return False
+        for key in key_list:
+            key = key.strip()
+            if re.search(r'제\s*\d+\s*항$', key):
+                if key in text_mapping_dict:
+                    return True
+            elif key in article_match_dict or key in text_mapping_dict:
+                return True
+        return False
+
+    fsc['is_evaluable'] = fsc['new_johang_clean_split_'].apply(_is_evaluable)
+    eligible = set(fsc.loc[fsc['is_evaluable'], 'jilui'])
+    print(f"평가가능 질의: {len(eligible):,}건 / 전체 고유 질의 {fsc['jilui'].nunique():,}건 "
+          f"(test는 이 평가가능 질의에서만 {test_size}건 층화추출)")
+
+    # test는 평가가능 질의에서만 층화추출 -> test_size = 평가가능 test 수 (버려지는 질의 없음)
+    fsc = split_fsc_train_test(fsc, test_size=test_size, strata_col='# of laws_clean',
+                               query_col='jilui', eligible_query_set=eligible)
 
     col_list = ['row','jilui','# of laws_clean','new_johang_clean_split_','full_text_matched','split']
     fsc = fsc[col_list]

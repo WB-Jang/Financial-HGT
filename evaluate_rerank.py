@@ -41,7 +41,7 @@ from data_loader import normalize_johang_key, fsc_dataset_preprocessing, encode_
 from query_encoder import QueryEncoder
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items, build_clause_adjacency,
-    compute_metric_rows, compute_article_metric_rows, summarize_metrics,
+    compute_metric_rows, compute_article_metric_rows, summarize_metrics, emb_tag,
 )
 
 NODES_CSV = './data/nodes.csv'
@@ -87,6 +87,8 @@ def main():
     parser.add_argument("--iters", type=int, default=10, help="PPR 전파 반복 수")
     parser.add_argument("--seeds", type=int, default=20, help="PPR 시드 조항 수")
     parser.add_argument("--max_entity_df", type=int, default=20)
+    parser.add_argument("--test_size", type=int, default=100,
+                        help="test 질의 수 (평가가능 질의에서 층화추출). 다른 스크립트와 동일 값 사용 필수")
     args = parser.parse_args()
 
     method_parts = []
@@ -106,7 +108,7 @@ def main():
             nodes_df['law_nm'], nodes_df['article_number'], nodes_df['hang_number']
         )
     ]
-    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df)
+    fsc = fsc_dataset_preprocessing(file=FSC_XLSX, nodes_df=nodes_df, test_size=args.test_size)
     fsc_test = fsc[fsc['split'] == 'test'].reset_index(drop=True)
 
     clause_list, clause_texts = build_clause_index(nodes_df)
@@ -189,14 +191,16 @@ def main():
     print(f"\n[조 단위 Hit@K]")
     print(art_summary[["num_laws", "num_queries"] + hit_cols].to_string(index=False))
 
-    # 6. 저장
+    # 6. 저장. 파일명 규칙: rerank_{origEmb|smoothEmb}_{stage2|bgeq}_{noppr|ppr-b0.5}_{para|article|summary}_{ts}
     eval_dir = os.path.join(os.path.dirname(__file__), "eval_results")
     os.makedirs(eval_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tag = "ppr" if args.ppr else "noppr"
-    para_df.to_csv(os.path.join(eval_dir, f"rerank_eval_paragraph_{tag}_{ts}.csv"), index=False, encoding="utf-8-sig")
-    art_df.to_csv(os.path.join(eval_dir, f"rerank_eval_article_{tag}_{ts}.csv"), index=False, encoding="utf-8-sig")
-    with open(os.path.join(eval_dir, f"rerank_eval_summary_{tag}_{ts}.json"), "w", encoding="utf-8") as f:
+    q_tag = "bgeq" if args.no_query_encoder else "stage2"
+    ppr_tag = f"ppr-b{args.beta:g}" if args.ppr else "noppr"
+    cfg = f"{emb_tag(args.clause_emb)}_{q_tag}_{ppr_tag}"
+    para_df.to_csv(os.path.join(eval_dir, f"rerank_{cfg}_paragraph_{ts}.csv"), index=False, encoding="utf-8-sig")
+    art_df.to_csv(os.path.join(eval_dir, f"rerank_{cfg}_article_{ts}.csv"), index=False, encoding="utf-8-sig")
+    with open(os.path.join(eval_dir, f"rerank_{cfg}_summary_{ts}.json"), "w", encoding="utf-8") as f:
         json.dump({
             "timestamp": ts,
             "method": method_name,
@@ -212,7 +216,7 @@ def main():
                 "overall": art_overall,
             },
         }, f, ensure_ascii=False, indent=2)
-    print(f"\n✅ 저장 완료: eval_results/rerank_eval_summary_{tag}_{ts}.json")
+    print(f"\n✅ 저장 완료: eval_results/rerank_{cfg}_summary_{ts}.json")
 
 
 if __name__ == "__main__":

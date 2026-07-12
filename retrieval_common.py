@@ -10,12 +10,26 @@ evaluate_baseline.py(베이스라인 평가)와 train_query_encoder.py(Stage 2 �
 - compute_metric_rows / summarize_metrics: Recall@K(비율형), Hit@K, MRR 계산
 """
 
+import os
 import re
 from collections import defaultdict
 
 import pandas as pd
 
 K_VALUES = [1, 3, 5, 10, 15, 30]
+
+
+def emb_tag(clause_emb_path):
+    """조항 임베딩 출처를 결과 파일명에 넣기 위한 짧은 태그.
+
+    None(원본 BGE 캐시) -> 'origEmb', 평활화 파일 -> 'smoothEmb', 그 외 -> 파일 stem.
+    """
+    if not clause_emb_path:
+        return "origEmb"
+    stem = os.path.splitext(os.path.basename(clause_emb_path))[0]
+    if "smooth" in stem.lower():
+        return "smoothEmb"
+    return re.sub(r'[^0-9A-Za-z]+', '-', stem).strip('-') or "customEmb"
 
 
 def article_key_of(clause_key):
