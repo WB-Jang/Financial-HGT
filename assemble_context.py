@@ -96,15 +96,25 @@ def rank_query(q_bge, model, clause_embs):
     return (F.normalize(q, dim=-1) @ clause_embs.T).squeeze(0)
 
 
-def pick_leads(sims, breadth, pool_n):
-    """관련도 top-N 후보에서 관련도-리드와 폭-리드를 선택.
-    반환: (relevance_lead_idx, breadth_lead_idx, pool_indices, breadth_lead_rank)"""
+def _minmax(v):
+    lo, hi = v.min(), v.max()
+    return (v - lo) / (hi - lo) if (hi - lo) > 1e-12 else v * 0.0
+
+
+def pick_leads(sims, breadth, pool_n, alpha=1.0):
+    """관련도 top-N 후보에서 관련도-리드와 (관련도·폭 블렌드) 리드를 선택.
+
+    블렌드 점수 = (1-alpha)*관련도_norm + alpha*폭_norm  (풀 내부 min-max 정규화)
+      alpha=0 -> 순수 관련도(=관련도 1위), alpha=1 -> 순수 폭.
+    반환: (relevance_lead_idx, blend_lead_idx, pool_indices, blend_lead_rank)
+    """
     pool = sims.topk(min(pool_n, sims.numel())).indices
     rel_lead = pool[0].item()
-    pool_breadth = breadth[pool]
-    b_pos = int(torch.argmax(pool_breadth).item())
-    breadth_lead = pool[b_pos].item()
-    return rel_lead, breadth_lead, pool.tolist(), b_pos
+    rel_norm = _minmax(sims[pool])
+    brd_norm = _minmax(breadth[pool])
+    blend = (1 - alpha) * rel_norm + alpha * brd_norm
+    b_pos = int(torch.argmax(blend).item())
+    return rel_lead, pool[b_pos].item(), pool.tolist(), b_pos
 
 
 # ── 모드 1: 단건 조립 ─────────────────────────────────────────────────────────
@@ -119,10 +129,10 @@ def run_single(args, ctx):
 
     with torch.no_grad():
         sims = rank_query(q_bge, model, ctx['clause_embs'])
-    rel_lead, breadth_lead, pool, _ = pick_leads(sims, ctx['breadth'], args.pool_n)
+    rel_lead, breadth_lead, pool, _ = pick_leads(sims, ctx['breadth'], args.pool_n, args.alpha)
 
     cl, texts, breadth = ctx['clause_list'], ctx['clause_texts'], ctx['breadth']
-    print(f"\n질의: {args.query}")
+    print(f"\n질의: {args.query}   (alpha={args.alpha})")
     print("=" * 78)
     print(f"[골격(framework) 조항 - 앞단 컨텍스트]  breadth={breadth[breadth_lead]:.3f}")
     print(f"  {cl[breadth_lead]}  (타법 참조법: {', '.join(sorted(ctx['ref_graph_laws'][breadth_lead])) or '-'})")
@@ -162,61 +172,63 @@ def run_eval(args, ctx):
         sims_all = q @ ctx['clause_embs'].T           # (Q, N)
 
     breadth, ref_graph_laws, clause_law = ctx['breadth'], ctx['ref_graph_laws'], ctx['clause_law']
-    rows = []
-    for i, it in enumerate(items):
-        target_laws = {clause_law[p] for p in it['pos_idxs']}       # 질의의 정답 법령 집합
-        rel_lead, breadth_lead, pool, b_rank = pick_leads(sims_all[i], breadth, args.pool_n)
+    num_laws = [it['num_laws'] for it in items]
+    targets = [{clause_law[p] for p in it['pos_idxs']} for it in items]
 
-        def reach(idx):
-            return {clause_law[idx]} | set(ref_graph_laws[idx])
+    def reach(idx):
+        return {clause_law[idx]} | set(ref_graph_laws[idx])
 
-        def cov(idx):
-            if not target_laws:
-                return None
-            return len(target_laws & reach(idx)) / len(target_laws)
+    def coverage(lead_idx, i):
+        t = targets[i]
+        return len(t & reach(lead_idx)) / len(t) if t else None
 
-        rows.append({
-            'query': it['query'],
-            'num_laws': it['num_laws'],
-            'rel_lead_cross_laws': len(ref_graph_laws[rel_lead]),
-            'breadth_lead_cross_laws': len(ref_graph_laws[breadth_lead]),
-            'rel_lead_coverage': cov(rel_lead),
-            'breadth_lead_coverage': cov(breadth_lead),
-            'breadth_lead_relrank': b_rank,     # 폭-리드가 관련도 몇 위였는지 (0=관련도 1위와 동일)
-        })
+    # alpha 스윕: 0(순수 관련도) ~ 1(순수 폭). 관련성-폭 트레이드오프의 최적점 탐색.
+    alphas = args.alpha_sweep if args.alpha_sweep else [args.alpha]
+    single = [i for i, n in enumerate(num_laws) if n == 1]
+    multi = [i for i, n in enumerate(num_laws) if n and n >= 3]   # 다법(교차) 질의
 
-    df = pd.DataFrame(rows)
-    ov = {
-        'num_queries': len(df),
-        'rel_lead_cross_laws(mean)': df['rel_lead_cross_laws'].mean(),
-        'breadth_lead_cross_laws(mean)': df['breadth_lead_cross_laws'].mean(),
-        'rel_lead_coverage(mean)': df['rel_lead_coverage'].mean(),
-        'breadth_lead_coverage(mean)': df['breadth_lead_coverage'].mean(),
-        'breadth_lead_relrank(mean)': df['breadth_lead_relrank'].mean(),
-    }
+    def mean(vals):
+        vals = [v for v in vals if v is not None]
+        return sum(vals) / len(vals) if vals else float('nan')
 
-    print("\n=== 폭 우선(breadth-first) vs 관련도 우선(relevance-first) 리드 조항 ===")
-    print(f"리드 조항의 평균 타법 참조 수:  관련도우선 {ov['rel_lead_cross_laws(mean)']:.2f}"
-          f"  →  폭우선 {ov['breadth_lead_cross_laws(mean)']:.2f}")
-    print(f"질의 법적범위 도달 커버리지:    관련도우선 {ov['rel_lead_coverage(mean)']:.3f}"
-          f"  →  폭우선 {ov['breadth_lead_coverage(mean)']:.3f}")
-    print(f"폭-리드의 평균 관련도 순위(0=1위): {ov['breadth_lead_relrank(mean)']:.1f}  (낮을수록 관련성도 유지)")
+    print("\n=== alpha 스윕: 관련도(alpha=0) ↔ 폭(alpha=1) 블렌드 ===")
+    print("alpha | 리드타법수 | 커버리지(전체) | 커버리지(단일법) | 커버리지(다법≥3) | 폭리드 관련도순위")
+    sweep_rows = []
+    best = None
+    for a in alphas:
+        leads = [pick_leads(sims_all[i], breadth, args.pool_n, a) for i in range(len(items))]
+        lead_idx = [L[1] for L in leads]
+        relranks = [L[3] for L in leads]
+        cov_all = [coverage(lead_idx[i], i) for i in range(len(items))]
+        cross = [len(ref_graph_laws[lead_idx[i]]) for i in range(len(items))]
+        r = {
+            'alpha': a,
+            'lead_cross_laws': mean(cross),
+            'coverage_all': mean(cov_all),
+            'coverage_single': mean([cov_all[i] for i in single]),
+            'coverage_multi3': mean([cov_all[i] for i in multi]),
+            'blend_lead_relrank': mean(relranks),
+        }
+        sweep_rows.append(r)
+        print(f" {a:.2f} |   {r['lead_cross_laws']:.2f}    |     {r['coverage_all']:.3f}    |"
+              f"     {r['coverage_single']:.3f}     |     {r['coverage_multi3']:.3f}     |    {r['blend_lead_relrank']:.1f}")
+        if best is None or r['coverage_all'] > best['coverage_all']:
+            best = r
 
-    print("\n[참조 법률 수(num_laws)별 도달 커버리지]")
-    by = df.groupby('num_laws')[['rel_lead_coverage', 'breadth_lead_coverage']].mean()
-    by['num_queries'] = df.groupby('num_laws').size()
-    print(by.reset_index().to_string(index=False))
+    print(f"\n권장: 전체 커버리지 최대 alpha={best['alpha']:.2f} "
+          f"(단일법은 관련도우선이 유리, 다법일수록 폭이 유리 — 목표에 따라 조정)")
+    print("주: coverage는 '리드가 질의의 정답 법령을 덮는 비율' 프록시. 최종 판단은 종단(LLM 답변) 평가로.")
 
     eval_dir = os.path.join(os.path.dirname(__file__), "eval_results")
     os.makedirs(eval_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    df.to_csv(os.path.join(eval_dir, f"breadth_assembly_detailed_{ts}.csv"), index=False, encoding="utf-8-sig")
+    pd.DataFrame(sweep_rows).to_csv(
+        os.path.join(eval_dir, f"breadth_assembly_sweep_{ts}.csv"), index=False, encoding="utf-8-sig")
     with open(os.path.join(eval_dir, f"breadth_assembly_summary_{ts}.json"), "w", encoding="utf-8") as f:
-        json.dump({'timestamp': ts, 'pool_n': args.pool_n,
-                   'breadth_weights': args.breadth_weights, 'overall': ov,
-                   'by_num_laws': by.reset_index().to_dict(orient='records')},
-                  f, ensure_ascii=False, indent=2)
-    print(f"\n✅ 저장: eval_results/breadth_assembly_summary_{ts}.json")
+        json.dump({'timestamp': ts, 'pool_n': args.pool_n, 'breadth_weights': args.breadth_weights,
+                   'n_single_law': len(single), 'n_multi_law(>=3)': len(multi),
+                   'sweep': sweep_rows}, f, ensure_ascii=False, indent=2)
+    print(f"\n✅ 저장: eval_results/breadth_assembly_sweep_{ts}.csv")
 
 
 def main():
@@ -224,7 +236,11 @@ def main():
     parser.add_argument("--query", default=None, help="단건 조립 모드: 질의문")
     parser.add_argument("--query_encoder", default="query_encoder_best.safetensors")
     parser.add_argument("--no_query_encoder", action="store_true", help="순수 BGE 검색")
-    parser.add_argument("--pool_n", type=int, default=20, help="관련도 top-N 후보 풀 (이 안에서 폭 최대 선택)")
+    parser.add_argument("--pool_n", type=int, default=20, help="관련도 top-N 후보 풀 (이 안에서 리드 선택)")
+    parser.add_argument("--alpha", type=float, default=0.5,
+                        help="리드 선택 시 폭 비중 (0=순수 관련도, 1=순수 폭). 단건 모드/스윕 미지정 시 사용")
+    parser.add_argument("--alpha_sweep", type=float, nargs="*", default=[0.0, 0.25, 0.5, 0.75, 1.0],
+                        help="배치 평가에서 스윕할 alpha 목록 (빈 값이면 --alpha 단일)")
     parser.add_argument("--detail_k", type=int, default=8, help="단건 모드: 상세 조항 출력 수")
     parser.add_argument("--breadth_weights", type=float, nargs=4, default=[0.5, 0.2, 0.1, 0.2],
                         help="breadth 가중치 (n_cross_laws, n_cross_refs, n_intra_refs, kg_degree)")
