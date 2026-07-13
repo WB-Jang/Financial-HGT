@@ -43,47 +43,12 @@ from query_encoder import QueryEncoder
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items, build_clause_adjacency,
     compute_metric_rows, compute_article_metric_rows, summarize_metrics, emb_tag,
-    BM25, korean_tokenize,
 )
+from ranking_methods import compute_base_scores, compute_ppr_scores, compute_cross_rerank
 
 NODES_CSV = './data/nodes.csv'
 TRIPLETS_CSV = './data/triplets.csv'
 FSC_XLSX = './data/for_review_corrected.xlsx'
-
-
-def rrf_fuse(dense_scores, bm25_scores, k=60):
-    """두 점수 벡터를 Reciprocal Rank Fusion으로 융합 (스케일 무관).
-    dense_scores, bm25_scores: (N,) 텐서/리스트 -> (N,) 융합 점수 텐서."""
-    dense = dense_scores if torch.is_tensor(dense_scores) else torch.tensor(dense_scores)
-    bm25 = torch.tensor(bm25_scores, dtype=torch.float32)
-    # 내림차순 순위(0-based): 점수 높을수록 rank 작음
-    dr = torch.empty_like(dense); dr[dense.argsort(descending=True)] = torch.arange(len(dense), dtype=dense.dtype)
-    br = torch.empty_like(bm25);  br[bm25.argsort(descending=True)]  = torch.arange(len(bm25), dtype=bm25.dtype)
-    return 1.0 / (k + dr) + 1.0 / (k + br)
-
-
-def build_ppr_operator(edge_w, n):
-    """PPR 전파에 필요한 텐서(src, dst, 전이확률)를 준비한다."""
-    pairs = torch.tensor(list(edge_w.keys()), dtype=torch.long)
-    w = torch.tensor(list(edge_w.values()), dtype=torch.float32)
-    src = torch.cat([pairs[:, 0], pairs[:, 1]])
-    dst = torch.cat([pairs[:, 1], pairs[:, 0]])
-    ww = torch.cat([w, w])
-
-    w_out = torch.zeros(n).index_add_(0, src, ww)      # 노드별 나가는 가중치 합
-    trans = ww / w_out[src].clamp(min=1e-12)            # 엣지별 전이 확률 w_ij / sum_j w_ij
-    isolated = w_out == 0                                # 이웃 없는 노드 (질량 자기 유지)
-    return src, dst, trans, isolated
-
-
-def personalized_pagerank(seed_vec, src, dst, trans, isolated, restart=0.5, iters=10):
-    """단일 질의의 PPR 점수 벡터 계산. seed_vec: (N,) 합=1"""
-    p = seed_vec.clone()
-    for _ in range(iters):
-        spread = torch.zeros_like(p).index_add_(0, dst, p[src] * trans)
-        spread = spread + p * isolated.float()           # 고립 노드는 질량 유지
-        p = restart * seed_vec + (1 - restart) * spread
-    return p
 
 
 def main():
@@ -166,21 +131,10 @@ def main():
             q = model(query_embs)
         print(f"QueryEncoder 로드: {args.query_encoder}")
 
-    dense_sims = q @ clause_embs.T                        # (Q, N) dense 코사인 점수
+    # 4. 기본 점수 (dense 또는 dense+BM25 하이브리드) — ranking_methods 공유 함수
+    base_scores = compute_base_scores(q, clause_embs, items, clause_texts, args.hybrid)
 
-    # 4. 기본 점수 (dense 또는 dense+BM25 하이브리드)
-    if args.hybrid:
-        print("BM25 어휘 인덱스 구축 중...", flush=True)
-        bm25 = BM25([korean_tokenize(t) for t in clause_texts])
-        base_scores = torch.zeros_like(dense_sims)
-        for i, it in enumerate(items):
-            bm = bm25.scores(korean_tokenize(it["query"]))
-            base_scores[i] = rrf_fuse(dense_sims[i], bm)   # RRF 융합 (스케일 무관)
-        print("dense+BM25 하이브리드(RRF) 융합 완료")
-    else:
-        base_scores = dense_sims
-
-    # 5. 재랭킹
+    # 5. 재랭킹 — ranking_methods 공유 함수 (assemble_context.py와 동일 구현)
     if args.rerank == "ppr":
         triplets_df = pd.read_csv(TRIPLETS_CSV)
         triplets_df['new_johang'] = [
@@ -188,45 +142,15 @@ def main():
             for law_nm, article_number in zip(triplets_df['law_nm'], triplets_df['article_number'])
         ]
         edge_w = build_clause_adjacency(clause_list, triplets_df, args.max_entity_df)
-        src, dst, trans, isolated = build_ppr_operator(edge_w, len(clause_list))
-
-        final_scores = torch.zeros_like(base_scores)
-        for i in range(base_scores.size(0)):
-            seed_idx = base_scores[i].topk(args.seeds).indices
-            seed_scores = base_scores[i][seed_idx]
-            seed_scores = (seed_scores - seed_scores.min()).clamp(min=1e-6)
-            seed_vec = torch.zeros(base_scores.size(1))
-            seed_vec[seed_idx] = seed_scores / seed_scores.sum()
-            ppr = personalized_pagerank(seed_vec, src, dst, trans, isolated,
-                                        restart=args.restart, iters=args.iters)
-            ppr_max = ppr.max()
-            ppr_n = ppr / ppr_max if ppr_max > 0 else ppr
-            # base를 [0,1] 정규화 후 PPR과 합산 (dense/hybrid 모두 스케일 안전)
-            b = base_scores[i]
-            b_n = (b - b.min()) / (b.max() - b.min()).clamp(min=1e-9)
-            final_scores[i] = b_n + args.beta * ppr_n
+        final_scores = compute_ppr_scores(base_scores, edge_w, len(clause_list),
+                                          seeds=args.seeds, beta=args.beta,
+                                          restart=args.restart, iters=args.iters)
         full_ranking = final_scores.argsort(dim=1, descending=True)
         full_ranked_lists = [row.tolist() for row in full_ranking]
-        print(f"PPR 재랭킹 완료 ({base_scores.size(0)}개 질의)")
 
     elif args.rerank == "cross":
-        from sentence_transformers import CrossEncoder
-        ce_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"cross-encoder 로드: {args.cross_model} (device={ce_device}, 첫 실행 시 다운로드)", flush=True)
-        ce = CrossEncoder(args.cross_model, device=ce_device, max_length=512)
-        base_ranking = base_scores.argsort(dim=1, descending=True)
-        full_ranked_lists = []
-        topk = min(args.rerank_topk, base_scores.size(1))
-        for i, it in enumerate(items):
-            base_order = base_ranking[i].tolist()
-            cand = base_order[:topk]
-            pairs = [[it["query"], clause_texts[c]] for c in cand]
-            ce_scores = ce.predict(pairs, batch_size=32, show_progress_bar=False)
-            reranked = [c for _, c in sorted(zip(ce_scores, cand), key=lambda x: -x[0])]
-            full_ranked_lists.append(reranked + base_order[topk:])
-            if (i + 1) % 50 == 0:
-                print(f"  cross-encoder [{i+1}/{len(items)}]", flush=True)
-        print(f"cross-encoder 재랭킹 완료 (질의당 상위 {topk}개)")
+        full_ranked_lists, _ = compute_cross_rerank(base_scores, items, clause_texts,
+                                                    cross_model=args.cross_model, topk=args.rerank_topk)
 
     else:  # none
         full_ranking = base_scores.argsort(dim=1, descending=True)

@@ -62,13 +62,35 @@ test 셋: 평가가능 질의(정답이 그래프에 존재)에서 층화추출(
 리드 선택은 **관련도·폭 블렌드**로 한다: `score = (1-alpha)*관련도 + alpha*폭` (후보 풀 내 min-max).
 `alpha=0`은 순수 관련도, `alpha=1`은 순수 폭.
 
+### 관련성 필터 방식 선택 — evaluate_rerank.py와 동일 플래그
+
+"관련 top-N을 뽑는" 1단계 자체를 여러 방식으로 만들 수 있다. `ranking_methods.py`(dense/hybrid/
+ppr/cross 스코어링을 evaluate_rerank.py와 공유하는 모듈)를 그대로 재사용하므로, **같은 재랭킹이
+recall 관점(§1)과 폭 관점(§1-b)에서 각각 어떻게 작동하는지 나란히 비교**할 수 있다:
+
 ```bash
 # 단건: 질의 -> 골격 조항 + 상세 조항으로 조립된 컨텍스트 출력
 python assemble_context.py --query "준법감시인의 자격요건은?" --alpha 0.5
 
 # 배치 평가: alpha 스윕(0~1)으로 관련성-폭 트레이드오프의 최적점 탐색 (같은 test 분할)
-python assemble_context.py --test_size 300 --pool_n 20
+python assemble_context.py --test_size 300 --pool_n 20                     # Stage2 dense (기본)
+python assemble_context.py --test_size 300 --rerank ppr --beta 0.5         # + PPR 그래프 재랭킹
+python assemble_context.py --test_size 300 --rerank cross                  # + cross-encoder 재랭킹
+python assemble_context.py --test_size 300 --hybrid                        # + BM25 하이브리드
 ```
+
+각 실행은 `eval_results/breadth_assembly_sweep_{방식태그}_{ts}.csv`를 남기므로(예:
+`stage2_dense_ppr-b0.5`, `stage2_dense_cross-k50`, `stage2_hybrid_none`), 네 파일을 나란히 놓고
+같은 alpha에서 `lead_cross_laws`/`coverage_all`이 어느 재랭킹에서 가장 높은지 비교한다.
+
+**PPR이 폭 지표에 유리할 것이라는 가설의 근거와 한계**: PPR은 breadth의 `kg_degree` 성분과
+**동일한 조항 인접 그래프**(형제 항 + 공유 엔터티, `--max_entity_df`로 통제)에서 확률을 전파하므로
+경로상 어느 정도 상관은 기대할 수 있다. 다만 breadth 점수의 최대 가중치(0.5+0.2=0.7)는 `kg_degree`가
+아니라 `cross_law_refs`(타법 참조 주석)에 실려 있고, 이는 PPR이 쓰는 그래프와 **별도 출처**다. 즉
+"KG 인접 중심성이 높은 조항"과 "타법을 실제로 많이 인용하는 조항"이 얼마나 겹치는지는 가정이 아니라
+실측해야 하는 질문이며, 위 스윕 비교가 그 답을 준다. cross-encoder/BM25는 애초에 그래프 신호를
+전혀 쓰지 않으므로, 이 둘 대비 PPR의 우위(또는 무위)가 곧 "그래프 인접성이 곧 법적 폭인가"에 대한
+직접적인 증거가 된다.
 
 배치 평가 지표 (검색 recall이 아니라 **앞단이 질의의 법적 범위를 얼마나 넓게 감싸는가**):
 - **lead_cross_laws**: 리드 조항이 참조하는 타법 수 — 폭을 키우면 커짐.
