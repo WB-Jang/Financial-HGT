@@ -1,0 +1,5 @@
+family,n,ties,tie_rate,effective_n
+hybrid,46,29,0.6304,17
+cross,45,30,0.6667,15
+ppr,46,39,0.8478,7
+dense,46,33,0.7174,13
