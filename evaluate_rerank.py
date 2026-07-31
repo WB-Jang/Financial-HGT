@@ -57,6 +57,10 @@ def main():
                         help="Stage 2 체크포인트 경로")
     parser.add_argument("--no_query_encoder", action="store_true",
                         help="QueryEncoder 없이 순수 BGE 질의 임베딩 사용")
+    parser.add_argument("--query_emb_file", default=None,
+                        help="질의 임베딩을 이 safetensors에서 읽고 QueryEncoder 적용을 건너뛴다 "
+                             "(예: lora/train_lora.py가 만든 emb_cache/fsc_query_embs_lora.safetensors). "
+                             "이후 재랭킹/지표 경로는 Stage2 arm과 완전히 동일하다")
     parser.add_argument("--clause_emb", default=None,
                         help="조항 임베딩 safetensors 파일 (미지정 시 원본 BGE 캐시)")
     parser.add_argument("--rerank", choices=["none", "ppr", "cross"], default="none",
@@ -78,7 +82,10 @@ def main():
     if args.ppr and args.rerank == "none":   # --ppr 별칭 호환
         args.rerank = "ppr"
 
-    method_parts = ["BGE query" if args.no_query_encoder else "Stage2 QueryEncoder"]
+    if args.query_emb_file:
+        method_parts = [f"query_emb={os.path.basename(args.query_emb_file)}"]
+    else:
+        method_parts = ["BGE query" if args.no_query_encoder else "Stage2 QueryEncoder"]
     if args.clause_emb:
         method_parts.append(f"clause_emb={os.path.basename(args.clause_emb)}")
     method_parts.append("hybrid(dense+BM25)" if args.hybrid else "dense")
@@ -112,7 +119,13 @@ def main():
         print(f"조항 임베딩 로드: {args.clause_emb}")
     else:
         clause_embs = encode_texts_cached(encoder, clause_texts, 'clause_embs')
-    query_embs = encode_texts_cached(encoder, [it["query"] for it in items], 'fsc_query_embs')
+    if args.query_emb_file:
+        query_embs = load_file(args.query_emb_file)['embeddings']
+        assert query_embs.size(0) == len(items), \
+            f"질의 임베딩 크기 불일치: {query_embs.size(0)} != {len(items)} (--test_size가 다르지 않은지 확인)"
+        print(f"질의 임베딩 로드: {args.query_emb_file}")
+    else:
+        query_embs = encode_texts_cached(encoder, [it["query"] for it in items], 'fsc_query_embs')
     del encoder
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -120,8 +133,8 @@ def main():
     clause_embs = F.normalize(clause_embs.float(), dim=-1)
     query_embs = F.normalize(query_embs.float(), dim=-1)
 
-    # 3. 질의 인코딩 (Stage 2 or 순수 BGE)
-    if args.no_query_encoder:
+    # 3. 질의 인코딩 (Stage 2 / 순수 BGE / 외부 파일)
+    if args.no_query_encoder or args.query_emb_file:
         q = query_embs
     else:
         model = QueryEncoder(dim=clause_embs.size(1))
@@ -181,7 +194,10 @@ def main():
     eval_dir = os.path.join(os.path.dirname(__file__), "eval_results")
     os.makedirs(eval_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    q_tag = "bgeq" if args.no_query_encoder else "stage2"
+    if args.query_emb_file:
+        q_tag = os.path.splitext(os.path.basename(args.query_emb_file))[0].replace('fsc_query_embs_', '')
+    else:
+        q_tag = "bgeq" if args.no_query_encoder else "stage2"
     retr_tag = "hybrid" if args.hybrid else "dense"
     if args.rerank == "ppr":
         rr_tag = f"ppr-b{args.beta:g}"
