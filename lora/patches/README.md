@@ -24,14 +24,22 @@ cp <Financial-HGT>/lora/checkpoints/adapter_model.safetensors data/kg/checkpoint
 
 ## 실행
 
+검색 방식은 환경변수가 아니라 **다섯 번째 위치 인자**다 (`eval_answers.py:205`).
+위치 인자는 `n · exp · fsc · decouple · mode · gates · local_top_n` 순이며,
+`gates=0`이 게이트 off, `decouple=0`이 기존 301문항 런과 같은 설정이다.
+
 ```bash
-MODE=fhgt_dense_lora \
-ANSWER_MODEL=google/gemma-4-26b-a4b \
 EVAL_MODEL=google/gemini-2.5-flash-lite \
+ANSWER_MODEL=google/gemma-4-26b-a4b \
 TEST_PAIRS=data/kg/fhgt_graph/test_pairs.jsonl \
 NO_DECOMPOSE=1 \
-  poetry run python scripts/eval_answers.py 301
+  poetry run python scripts/eval_answers.py \
+    301 answers_301개_질문분해x_dense_lora_top15 \
+    data/kg/fhgt_graph/fsc_ground_truth.csv \
+    0 fhgt_dense_lora 0 15
 ```
+
+산출물은 `runs/<exp>/answer_details.jsonl`과 `runs/<exp>/answer_metrics.json`이다.
 
 `LORA_PATH`로 다른 어댑터를, `LORA_MAX_LEN`으로 절단 길이를 바꿀 수 있다.
 기본 448은 학습 시 값이며(질의 토큰 99분위 438 실측), **바꾸면 학습/추론 분포가
