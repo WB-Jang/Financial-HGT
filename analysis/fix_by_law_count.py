@@ -9,9 +9,14 @@ KG에 존재하는 조항만 남기므로, 인용된 법령 중 일부가 KG 밖
 사라지고 문항이 낮은 버킷으로 밀린다. 결과적으로 3-4법 버킷이 실제보다 훨씬 작게
 집계된다(관측된 사례: n=11, 실제 47).
 
-정답은 answer_details.jsonl의 num_laws 필드다. 이 값은 심사자가 정리한
-for_review_corrected.xlsx의 '# of laws_clean'과 같아야 하며, 이 스크립트가 그것을
-검증한 뒤 by_law_count를 다시 집계한다.
+버킷은 answer_details.jsonl의 num_laws 필드로 다시 집계한다.
+
+num_laws의 기준 축은 --num_laws_ref로 지정한다. 기존 301문항 런들(17구성)이 공유하는
+층화가 이미 마스터 파일 ⑤ 시트와 대응표본 분석 전체의 기준이므로, 신규 런을 그 표에
+얹으려면 같은 축을 써야 한다. 지정하지 않으면 details 자신의 num_laws를 쓴다.
+
+for_review_corrected.xlsx의 '# of laws_clean'과의 차이는 참고용으로 보고만 한다.
+기준 축 선택은 기존 결과와의 비교 가능성 문제이지 이 스크립트가 판정할 문제가 아니다.
 
 전역 지표(RAGAS/ARES/REFERENCE/answer_cite_recall)는 버킷과 무관하므로 건드리지 않고,
 details로부터 재계산해 원본과 일치하는지만 확인한다.
@@ -19,6 +24,7 @@ details로부터 재계산해 원본과 일치하는지만 확인한다.
 사용법:
     python analysis/fix_by_law_count.py \
         --details answer_details.jsonl --metrics answer_metrics.json \
+        --num_laws_ref <기존_런>-answer_details_f.jsonl \
         --out answer_metrics_f.json
 """
 
@@ -44,19 +50,24 @@ def norm(s):
     return re.sub(r'\s+', '', str(s))
 
 
-def verify_num_laws(rows, fsc_xlsx, sheet):
-    """details의 num_laws가 심사자 원본 '# of laws_clean'과 같은지 확인."""
+def load_ref_num_laws(path):
+    """기준 축이 될 기존 런의 num_laws를 idx -> num_laws로 읽는다."""
+    with open(path, encoding='utf-8') as f:
+        return {r['idx']: r['num_laws'] for r in (json.loads(line) for line in f)}
+
+
+def compare_with_source(rows, num_laws, fsc_xlsx, sheet):
+    """채택한 num_laws가 심사자 원본 '# of laws_clean'과 얼마나 다른지 참고 보고."""
     df = pd.read_excel(fsc_xlsx, sheet_name=sheet)
     lut = {}
     for _, r in df.iterrows():
         lut.setdefault(norm(r['jilui']), int(r['# of laws_clean']))
-    missing = [r['idx'] for r in rows if norm(r['query']) not in lut]
-    bad = [(r['idx'], r['num_laws'], lut[norm(r['query'])])
-           for r in rows if norm(r['query']) in lut and r['num_laws'] != lut[norm(r['query'])]]
-    print(f'원본 대조: 질의 매칭 {len(rows) - len(missing)}/{len(rows)}, num_laws 불일치 {len(bad)}건')
-    for idx, got, want in bad[:10]:
-        print(f'  idx={idx} details={got} xlsx={want}')
-    return len(bad) == 0 and not missing
+    diff = [(r['idx'], num_laws[r['idx']], lut[norm(r['query'])])
+            for r in rows if norm(r['query']) in lut and num_laws[r['idx']] != lut[norm(r['query'])]]
+    print(f'참고: 채택한 num_laws와 {sheet}의 # of laws_clean 차이 {len(diff)}건')
+    for idx, got, want in diff[:10]:
+        print(f'  idx={idx} 채택={got} xlsx={want}')
+    return len(diff)
 
 
 def main():
@@ -64,6 +75,8 @@ def main():
     ap.add_argument('--details', required=True)
     ap.add_argument('--metrics', required=True)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--num_laws_ref', default=None,
+                    help='num_laws 기준 축으로 삼을 기존 런의 answer_details jsonl')
     ap.add_argument('--fsc_xlsx', default='data/for_review_corrected.xlsx')
     ap.add_argument('--fsc_sheet', default='법령O+조항O')
     args = ap.parse_args()
@@ -76,7 +89,21 @@ def main():
     if len(rows) != m['n']:
         raise ValueError(f'문항 수 불일치: details {len(rows)} vs metrics {m["n"]}')
 
-    verified = verify_num_laws(rows, args.fsc_xlsx, args.fsc_sheet)
+    if args.num_laws_ref:
+        ref = load_ref_num_laws(args.num_laws_ref)
+        missing = [r['idx'] for r in rows if r['idx'] not in ref]
+        if missing:
+            raise ValueError(f'기준 파일에 없는 idx {len(missing)}건: {missing[:5]}')
+        num_laws = {r['idx']: ref[r['idx']] for r in rows}
+        moved = sum(1 for r in rows if bucket(r['num_laws']) != bucket(num_laws[r['idx']]))
+        print(f'num_laws 기준 축: {args.num_laws_ref}')
+        print(f'  자체 num_laws 대비 값이 다른 문항 '
+              f'{sum(1 for r in rows if r["num_laws"] != num_laws[r["idx"]])}건, '
+              f'그중 버킷이 바뀌는 문항 {moved}건')
+    else:
+        num_laws = {r['idx']: r['num_laws'] for r in rows}
+        print('num_laws 기준 축: details 자체 필드')
+    n_diff = compare_with_source(rows, num_laws, args.fsc_xlsx, args.fsc_sheet)
 
     # 전역 지표는 정정 대상이 아니다 — 재계산해 원본과 같은지만 확인한다.
     print('\n전역 지표 재현 확인 (정정 대상 아님)')
@@ -89,7 +116,7 @@ def main():
     old = m.get('by_law_count', {})
     new = {}
     for b in ('1-2', '3-4', '5+'):
-        sel = [r for r in rows if bucket(r['num_laws']) == b]
+        sel = [r for r in rows if bucket(num_laws[r['idx']]) == b]
         if not sel:
             continue
         cor = np.array([r['scores'].get('answer_correctness') for r in sel], dtype=float)
@@ -120,10 +147,11 @@ def main():
     m['by_law_count'] = new
     m['by_law_count_source'] = {
         'field': 'answer_details.num_laws',
-        'verified_against': f'{args.fsc_xlsx} > {args.fsc_sheet} > # of laws_clean',
-        'verified': bool(verified),
+        'num_laws_ref': args.num_laws_ref or 'self',
+        'diff_vs_fsc_clean': n_diff,
         'note': 'eval_answers.py는 gold_positives의 서로 다른 법령 수로 버킷을 나눠 '
-                'KG 밖 법령이 누락되면 버킷이 낮아진다. 이 파일은 num_laws로 다시 집계한 정정본이다.',
+                'KG 밖 법령이 누락되면 버킷이 낮아진다. 이 파일은 num_laws로 다시 집계한 정정본이며, '
+                '기존 301문항 런들과 같은 층화를 쓰도록 num_laws_ref의 축을 따랐다.',
     }
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(m, f, ensure_ascii=False, indent=2)
