@@ -1,0 +1,143 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index bcf96f0..b4a0679 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -53,6 +53,7 @@ optional = true
+ [tool.poetry.group.gnn.dependencies]
+ torch = ">=2.2,<3.0"
+ transformers = ">=4.45,<5.0"
++peft = ">=0.11"          # fhgt_<sub>_lora: BGE-M3에 LoRA 어댑터를 얹어 질의를 인코딩
+ 
+ [tool.poetry.group.eval]
+ optional = true
+diff --git a/scripts/eval_answers.py b/scripts/eval_answers.py
+index e299372..8f9b8d8 100644
+--- a/scripts/eval_answers.py
++++ b/scripts/eval_answers.py
+@@ -35,6 +35,12 @@ PPR_ALPHA = os.environ.get("PPR_ALPHA")
+ # mode=breadth_<base> (예: breadth_dense, breadth_ppr, breadth_fora) 에서 사용.
+ BREADTH_ALPHA = os.environ.get("BREADTH_ALPHA")
+ 
++# BGE-M3 LoRA 어댑터 경로 — mode=fhgt_<sub>_lora 에서 사용. 어댑터는 질의 인코딩만
++# 바꾸고 조항 임베딩(node_emb.pt)은 동결 BGE 그대로라, MLP arm과 문서 공간이 같다.
++# LORA_MAX_LEN은 학습 시 절단 길이와 맞춰야 한다(그 값을 벗어난 질의는 분포가 어긋남).
++LORA_PATH = os.environ.get("LORA_PATH", "data/kg/checkpoints/lora_bge_m3")
++LORA_MAX_LEN = int(os.environ.get("LORA_MAX_LEN", "448"))
++
+ # 답변 생성(node_generate_answers/synthesize) 전용 모델 — 미설정 시 EVAL_MODEL과 동일한
+ # 모델을 씀(질문분해/키워드추출/judge까지 전부 EVAL_MODEL 하나로 통일됨). ANSWER_MODEL을
+ # 설정하면 답변 생성만 별도 모델(OpenRouter 슬러그)로 분리되고, QD/KE/judge는 그대로 EVAL_MODEL.
+@@ -236,15 +242,21 @@ def main() -> int:
+             from src.modules.cross_rerank_retriever import CrossRerankRetriever
+             override = CrossRerankRetriever(override, device=_device(), pool=50, top_k=30)
+     elif mode.startswith("fhgt_"):   # Financial-HGT dense/hybrid/ppr/cross — thesis D-axis (new data)
+-        # fhgt_<mode>[_raw]: 접미사 _raw 면 학습 인코더 off = 순수 BGE-M3 베이스라인
++        # fhgt_<mode>[_raw|_lora]: _raw 면 학습 인코더 off = 순수 BGE-M3 베이스라인,
++        # _lora 면 잔차 QueryEncoder 대신 LoRA 파인튜닝한 BGE-M3로 질의를 인코딩한다.
+         from src.modules.financial_hgt_retriever import FinancialHGTRetriever
+         sub = mode.split("_", 1)[1]                          # dense | hybrid | ppr | cross | dense_raw ...
+-        use_qe = not sub.endswith("_raw")
+-        sub = sub[:-4] if sub.endswith("_raw") else sub      # strip _raw
++        use_qe, lora_path, max_len = True, None, 512
++        if sub.endswith("_raw"):
++            use_qe, sub = False, sub[:-4]
++        elif sub.endswith("_lora"):
++            use_qe, sub = False, sub[:-5]
++            lora_path, max_len = LORA_PATH, LORA_MAX_LEN
+         ppr_restart = float(PPR_ALPHA) if PPR_ALPHA else 0.5  # sub=="ppr"일 때만 실제 사용됨
+         override = FinancialHGTRetriever(mode=sub, graph_dir="data/kg/fhgt_graph",
+                                          ckpt_path="data/kg/checkpoints/query_encoder_fhgt_best.pt",
+                                          device=_device(), top_k=30, use_query_encoder=use_qe,
++                                         lora_path=lora_path, max_len=max_len,
+                                          ppr_restart=ppr_restart)
+     elif mode.startswith("breadth_"):   # 폭 우선 컨텍스트 조립 (assemble_context.py 이식) — thesis 축
+         # breadth_<base>: base 검색기 후보 풀에서 관련도-폭 블렌드로 lead 조항 선택.
+@@ -395,7 +407,9 @@ def main() -> int:
+                        "gt_found": f"{found_gt}/{len(sample)}", "gt_matched": f"{matched_gt}/{len(sample)}",
+                        "ppr_alpha": PPR_ALPHA if PPR_ALPHA else "default",
+                        "breadth_alpha": (BREADTH_ALPHA if BREADTH_ALPHA else "default(0.5)")
+-                                        if mode.startswith("breadth_") else None},
++                                        if mode.startswith("breadth_") else None,
++                       "lora_path": LORA_PATH if mode.endswith("_lora") else None,
++                       "lora_max_len": LORA_MAX_LEN if mode.endswith("_lora") else None},
+         "RAGAS": {m: agg[m] for m in RAGAS},
+         "ARES": {m: agg[m] for m in ARES},
+         "REFERENCE": {m: agg[m] for m in REFERENCE},   # ANSWER↔gold (judge, semantic)
+diff --git a/src/experiments/matrix.py b/src/experiments/matrix.py
+index 4719f2e..02ae7a9 100644
+--- a/src/experiments/matrix.py
++++ b/src/experiments/matrix.py
+@@ -69,6 +69,8 @@ def build_retriever(spec: dict):
+             device=spec.get("device", _default_device()),
+             top_k=int(spec.get("top_k", 30)),
+             use_query_encoder=bool(spec.get("use_query_encoder", True)),
++            lora_path=spec.get("lora_path"),          # 지정 시 LoRA-BGE로 질의 인코딩 (QueryEncoder 대체)
++            max_len=int(spec.get("max_len", 512)),    # LoRA arm은 학습 시 절단 길이와 맞출 것
+             ppr_beta=float(spec.get("beta", 0.5)),
+             ppr_seeds=int(spec.get("seeds", 20)),
+             ppr_restart=float(spec.get("restart", spec.get("alpha", 0.5))),  # PPR teleport(alpha): 낮을수록 깊이 탐색
+diff --git a/src/modules/financial_hgt_retriever.py b/src/modules/financial_hgt_retriever.py
+index 596bce7..1cf7e43 100644
+--- a/src/modules/financial_hgt_retriever.py
++++ b/src/modules/financial_hgt_retriever.py
+@@ -4,6 +4,10 @@ Insight-Agent 파이프라인에 Financial-HGT의 검색 방법론을 편입한
+ 임베딩 → 잔차 QueryEncoder(1024d)로 투영 → 조항 BGE 임베딩과 코사인, 그 위에
+ mode별 처리:
+ 
++질의 측 학습은 세 갈래다. QueryEncoder(기본) / 없음(use_query_encoder=False, 순수
++BGE-M3) / LoRA(lora_path, 어댑터를 얹은 BGE-M3). 어느 쪽이든 조항 임베딩은 동결
++BGE 그대로이므로 세 arm이 같은 문서 공간을 공유한다.
++
+   dense  : 코사인 top-k
+   hybrid : dense + BM25 어휘 (RRF 융합)
+   ppr    : dense 위에 조항 인접그래프(COREF+SIBLING+CROSS) PPR 재랭킹
+@@ -43,6 +47,8 @@ class FinancialHGTRetriever:
+         device: str = "cpu",
+         top_k: int = 15,
+         use_query_encoder: bool = True,   # False → 학습 인코더 off = 순수 BGE-M3 베이스라인
++        lora_path: Optional[str] = None,  # 지정 시 BGE-M3에 LoRA 어댑터 적용 (질의 측만)
++        max_len: int = 512,               # 질의 절단 길이. LoRA arm은 학습 시 값과 맞춰야 한다
+         # ppr
+         ppr_beta: float = 0.5,
+         ppr_seeds: int = 20,
+@@ -60,7 +66,10 @@ class FinancialHGTRetriever:
+         self.cross_model = cross_model
+         self.device = device
+         self.top_k = top_k
+-        self.use_query_encoder = use_query_encoder
++        self.lora_path = lora_path
++        self.max_len = max_len
++        # LoRA는 질의 인코딩 자체를 학습한 것이므로 잔차 QueryEncoder와 겹쳐 쓰지 않는다
++        self.use_query_encoder = use_query_encoder and not lora_path
+         self.ppr_beta, self.ppr_seeds = ppr_beta, ppr_seeds
+         self.ppr_restart, self.ppr_iters = ppr_restart, ppr_iters
+         self.rerank_topk = rerank_topk
+@@ -120,6 +129,12 @@ class FinancialHGTRetriever:
+ 
+         self._tok = AutoTokenizer.from_pretrained(self.bge_model)
+         self._bge = AutoModel.from_pretrained(self.bge_model, use_safetensors=True).to(self.device).eval()
++        if self.lora_path:
++            # 어댑터는 질의 인코딩만 바꾼다. 조항 임베딩(node_emb.pt)은 동결 BGE 그대로라
++            # MLP arm과 문서 공간이 동일하게 유지된다.
++            from peft import PeftModel
++            self._bge = PeftModel.from_pretrained(self._bge, self.lora_path).to(self.device).eval()
++            logger.info("[fhgt] LoRA adapter loaded: {} (max_len={})", self.lora_path, self.max_len)
+         if self.use_query_encoder:
+             self._qe = QueryEncoderFHGT(dim=self._clause_embs.size(1)).to(self.device)
+             self._qe.load_state_dict(torch.load(self.ckpt_path, weights_only=True, map_location=self.device))
+@@ -149,7 +164,7 @@ class FinancialHGTRetriever:
+         k = top_k or self.top_k
+         with torch.no_grad():
+             enc = self._tok([query_text], return_tensors="pt", padding=True,
+-                            truncation=True, max_length=512).to(self.device)
++                            truncation=True, max_length=self.max_len).to(self.device)
+             bge = F.normalize(self._bge(**enc).last_hidden_state[:, 0, :].float(), dim=-1)
+             q = (self._qe(bge) if self._qe is not None else bge).cpu()  # (1, 1024); None → raw BGE-M3
+ 
+@@ -181,5 +196,5 @@ class FinancialHGTRetriever:
+                                       full_text=self._full_texts[idx], triple=None))
+         logger.debug("[fhgt] '{}' → {} nodes (mode={}, enc={}, k={})",
+                      query_text[:40], len(results), self.mode,
+-                     "on" if self._qe is not None else "raw-bge", k)
++                     "on" if self._qe is not None else ("lora" if self.lora_path else "raw-bge"), k)
+         return results
