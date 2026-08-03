@@ -208,11 +208,10 @@ def main():
         else:
             bad_epochs += 1
 
-        if epoch % 5 == 0 or mark or epoch == 1:
-            print(f"epoch {epoch:3d} | loss={float(loss):.5f} "
-                  f"(intra {float(loss_intra):.5f} cross {float(loss_cross):.5f} "
-                  f"neg {float(loss_neg):.5f}) | val_mse={val:.5f} | "
-                  f"cos 이웃 {pos_cos:+.3f} vs 무작위 {rnd_cos:+.3f}{mark}")
+        print(f"epoch {epoch:3d} | loss={loss.item():.5f} "
+              f"(intra {loss_intra.item():.5f} cross {loss_cross.item():.5f} "
+              f"neg {loss_neg.item():.5f}) | val_mse={val:.5f} | "
+              f"cos 이웃 {pos_cos:+.3f} vs 무작위 {rnd_cos:+.3f} | 미개선 {bad_epochs}{mark}")
         if bad_epochs >= args.patience:
             print(f"early stopping (patience {args.patience})")
             break

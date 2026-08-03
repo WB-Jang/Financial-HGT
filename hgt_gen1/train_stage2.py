@@ -117,8 +117,12 @@ def main():
             nb = set()
             for p in it["pos_idxs"]:
                 nb |= adj.get(p, set())
-            it["neighbor_set"] = nb - it["pos_idxs"]
+            it["neighbor_set"] = nb - it["pos_idxs"]      # mine_hard_negatives는 집합을 쓴다
         neighbors = {"on": True}
+    for it in train_items:
+        # infonce_multi_positive는 텐서 인덱싱을 하므로 리스트여야 한다 (집합이면 IndexError)
+        it["pos_list"] = sorted(it["pos_idxs"])
+        it["neighbor_list"] = sorted(it.get("neighbor_set", set()))
 
     rng = torch.Generator().manual_seed(args.seed)
     idx = torch.randperm(len(train_items), generator=rng).tolist()
@@ -158,10 +162,10 @@ def main():
             q = model(fit_qemb[batch])
             loss = infonce_multi_positive(
                 q, clause_embs,
-                [fit_items[i]["pos_idxs"] for i in batch],
+                [fit_items[i]["pos_list"] for i in batch],
                 [fit_items[i]["hard_neg_idxs"] for i in batch],
                 args.temp, args.margin,
-                [fit_items[i].get("neighbor_set", set()) for i in batch] if neighbors else None,
+                [fit_items[i]["neighbor_list"] for i in batch] if neighbors else None,
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
