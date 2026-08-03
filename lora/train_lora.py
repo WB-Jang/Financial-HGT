@@ -47,6 +47,7 @@ from data_loader import (  # noqa: E402
 from retrieval_common import (  # noqa: E402
     K_VALUES, build_clause_index, build_retrieval_items, build_clause_adjacency,
     compute_metric_rows, compute_article_metric_rows, summarize_metrics,
+    apply_num_laws_ref, load_num_laws_ref, summarize_by_bucket,
 )
 from train_query_encoder import infonce_multi_positive  # noqa: E402  <- 손실은 재구현하지 않는다
 
@@ -150,6 +151,9 @@ def main():
     parser.add_argument("--hard_neg_margin", type=float, default=0.1)
     parser.add_argument("--test_size", type=int, default=300,
                         help="test 질의 수. MLP arm과 반드시 같은 값이어야 분할이 일치한다")
+    parser.add_argument("--num_laws_ref", default=None,
+                        help="기존 런의 answer_details jsonl. 지정 시 num_laws를 질의 텍스트로 "
+                             "매칭해 덮어써 층화 축을 기존 17런(250/46/5)과 맞춘다")
     parser.add_argument("--exclude_neighbors", type=int, default=1)
     parser.add_argument("--max_entity_df", type=int, default=20)
     parser.add_argument("--lora_r", type=int, default=16)
@@ -183,6 +187,8 @@ def main():
     clause_list, clause_texts = build_clause_index(nodes_df)
     train_items, tr_skip = build_retrieval_items(fsc_train, clause_list)
     test_items, te_skip = build_retrieval_items(fsc_test, clause_list)
+    if args.num_laws_ref:
+        apply_num_laws_ref(test_items, load_num_laws_ref(args.num_laws_ref))
     print(f"조항 노드 {len(clause_list):,}개 | train {len(train_items)}건(제외 {tr_skip}) | "
           f"test {len(test_items)}건(제외 {te_skip})")
 
@@ -352,6 +358,11 @@ def main():
     art_summary, art_by, art_overall, _, _ = summarize_metrics(art_df, K_VALUES, mrr_col)
 
     pd.set_option("display.width", 200)
+    print("\n=== [주 지표] 항(paragraph) 단위 · 관련법 버킷 ===")
+    print(summarize_by_bucket(para_df, K_VALUES, mrr_col).to_string(index=False))
+    print("\n=== [서브 지표] 조(article) 단위 · 관련법 버킷 ===")
+    print(summarize_by_bucket(art_df, K_VALUES, mrr_col).to_string(index=False))
+
     print("\n=== [주 지표] 항(paragraph) 단위 ===")
     print(para_summary[["num_laws", "num_queries"] + recall_cols].to_string(index=False))
     print(para_summary[["num_laws", "num_queries"] + hit_cols + [mrr_col]].to_string(index=False))

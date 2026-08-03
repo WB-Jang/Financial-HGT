@@ -10,6 +10,7 @@ evaluate_baseline.py(베이스라인 평가)와 train_query_encoder.py(Stage 2 �
 - compute_metric_rows / summarize_metrics: Recall@K(비율형), Hit@K, MRR 계산
 """
 
+import json
 import os
 import re
 import math
@@ -211,6 +212,69 @@ def build_retrieval_items(fsc_df, clause_list):
     return items, skipped
 
 
+def law_bucket(n):
+    """참조 법률 개수 -> 층화 버킷. insight-agent retrieval_eval.category_from_laws와 같은 경계."""
+    if n is None:
+        return "unknown"
+    return "1-2" if n <= 2 else ("3-4" if n <= 4 else "5+")
+
+
+def _norm_query(s):
+    return re.sub(r'\s+', '', str(s))
+
+
+def load_num_laws_ref(path):
+    """기존 런의 answer_details jsonl에서 {정규화 질의: num_laws} 를 읽는다.
+
+    레포는 num_laws를 for_review_corrected.xlsx의 '# of laws_clean'에서 직접 읽어
+    버킷이 253/47/1이 된다. 기존 301문항 런 17개는 test_pairs.jsonl이 들고 있던 값을
+    써서 250/46/5이고, 두 축은 13문항이 다르다. 답변 품질 지표와 같은 표에 놓으려면
+    검색 지표도 같은 축이어야 하므로, 기준 런의 값을 질의 텍스트로 매칭해 덮어쓴다.
+    """
+    ref = {}
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            r = json.loads(line)
+            ref.setdefault(_norm_query(r['query']), r['num_laws'])
+    return ref
+
+
+def apply_num_laws_ref(items, ref, verbose=True):
+    """items의 num_laws를 기준 런 값으로 덮어쓴다. 기준에 없는 질의는 그대로 둔다."""
+    changed = missing = 0
+    for it in items:
+        key = _norm_query(it['query'])
+        if key not in ref:
+            missing += 1
+            continue
+        if it['num_laws'] != ref[key]:
+            changed += 1
+            it['num_laws'] = ref[key]
+    if verbose:
+        counts = Counter(law_bucket(it['num_laws']) for it in items)
+        print(f"num_laws 기준 축 적용: {changed}건 덮어씀, 기준에 없는 질의 {missing}건")
+        print(f"  버킷: {dict(sorted(counts.items()))}")
+    return changed, missing
+
+
+def summarize_by_bucket(eval_df, k_values=K_VALUES, mrr_col=None):
+    """num_laws 원값이 아니라 1-2 / 3-4 / 5+ 버킷별 평균 + overall."""
+    if mrr_col is None:
+        mrr_col = f"mrr@{max(k_values)}"
+    metric_cols = [f"recall@{k}" for k in k_values] + [f"hit@{k}" for k in k_values] + [mrr_col]
+    df = eval_df.copy()
+    if "law_bucket" not in df.columns:
+        df["law_bucket"] = df["num_laws"].map(law_bucket)
+    order = {"1-2": 0, "3-4": 1, "5+": 2, "unknown": 3}
+    by = df.groupby("law_bucket")[metric_cols].mean()
+    by["num_queries"] = df.groupby("law_bucket").size()
+    by = by.reset_index()
+    by = by.sort_values("law_bucket", key=lambda s: s.map(order)).reset_index(drop=True)
+    overall = {"law_bucket": "overall", "num_queries": len(df)}
+    overall.update(df[metric_cols].mean().to_dict())
+    return pd.concat([by, pd.DataFrame([overall])], ignore_index=True)
+
+
 def _metric_row(ranked, pos_set, k_values):
     """단일 질의의 recall/hit/MRR 계산. ranked와 pos_set의 원소는 인덱스든 문자열이든 무방."""
     max_k = max(k_values)
@@ -240,6 +304,7 @@ def compute_metric_rows(ranked_lists, items, k_values=K_VALUES):
         row = {
             "query": it["query"],
             "num_laws": it["num_laws"],
+            "law_bucket": law_bucket(it["num_laws"]),
             "num_positive_clauses": len(it["pos_idxs"]),
         }
         row.update(_metric_row(ranked, it["pos_idxs"], k_values))
@@ -274,6 +339,7 @@ def compute_article_metric_rows(full_ranked_lists, items, clause_list, k_values=
         row = {
             "query": it["query"],
             "num_laws": it["num_laws"],
+            "law_bucket": law_bucket(it["num_laws"]),
             "num_positive_articles": len(pos_articles),
         }
         row.update(_metric_row(article_ranking, pos_articles, k_values))

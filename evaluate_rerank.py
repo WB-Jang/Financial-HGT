@@ -43,6 +43,7 @@ from query_encoder import QueryEncoder
 from retrieval_common import (
     K_VALUES, build_clause_index, build_retrieval_items, build_clause_adjacency,
     compute_metric_rows, compute_article_metric_rows, summarize_metrics, emb_tag,
+    apply_num_laws_ref, load_num_laws_ref, summarize_by_bucket,
 )
 from ranking_methods import compute_base_scores, compute_ppr_scores, compute_cross_rerank
 
@@ -75,6 +76,9 @@ def main():
     parser.add_argument("--cross_model", default="BAAI/bge-reranker-v2-m3",
                         help="cross-encoder 재랭커 모델")
     parser.add_argument("--max_entity_df", type=int, default=20)
+    parser.add_argument("--num_laws_ref", default=None,
+                        help="기존 런의 answer_details jsonl. 지정 시 num_laws를 질의 텍스트로 "
+                             "매칭해 덮어써 층화 축을 기존 17런(250/46/5)과 맞춘다")
     parser.add_argument("--test_size", type=int, default=100,
                         help="test 질의 수 (평가가능 질의에서 층화추출). 다른 스크립트와 동일 값 사용 필수")
     args = parser.parse_args()
@@ -109,6 +113,8 @@ def main():
 
     clause_list, clause_texts = build_clause_index(nodes_df)
     items, skipped = build_retrieval_items(fsc_test, clause_list)
+    if args.num_laws_ref:
+        apply_num_laws_ref(items, load_num_laws_ref(args.num_laws_ref))
     print(f"조항 노드 {len(clause_list):,}개 | 평가 가능 질의 {len(items)}건 (제외 {skipped}건)")
 
     # 2. 임베딩 준비 (인코딩은 GPU가 있으면 GPU, 끝나면 즉시 해제)
@@ -182,6 +188,11 @@ def main():
     art_summary, art_by, art_overall, _, _ = summarize_metrics(art_df, K_VALUES, mrr_col)
 
     pd.set_option("display.width", 220)
+    print(f"\n[항(paragraph) 단위 · 관련법 버킷 - 답변 품질 지표와 같은 층화]")
+    print(summarize_by_bucket(para_df, K_VALUES, mrr_col).to_string(index=False))
+    print(f"\n[조(article) 단위 · 관련법 버킷]")
+    print(summarize_by_bucket(art_df, K_VALUES, mrr_col).to_string(index=False))
+
     print(f"\n[항(paragraph) 단위 - 기존 평가들과 동일 정의]")
     print(para_summary[["num_laws", "num_queries"] + recall_cols + [mrr_col]].to_string(index=False))
     print(f"\n[조(article) 단위 - KG-search 프로젝트와 비교 가능한 세밀도]")

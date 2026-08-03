@@ -29,9 +29,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from data_loader import (encode_texts_cached, fsc_dataset_preprocessing,  # noqa: E402
                          make_bge_encoder, normalize_johang_key)
 from hgt_gen1.model import QueryEncoder256  # noqa: E402
-from retrieval_common import (K_VALUES, build_article_expander, build_clause_index,  # noqa: E402
+from retrieval_common import (K_VALUES, apply_num_laws_ref, build_clause_index,  # noqa: E402
                               build_retrieval_items, compute_article_metric_rows,
-                              compute_metric_rows, summarize_metrics)
+                              compute_metric_rows, load_num_laws_ref, summarize_by_bucket)
 
 
 def main():
@@ -40,6 +40,9 @@ def main():
     ap.add_argument("--ckpt", default="hgt_gen1/checkpoints/query_encoder_hgt_best.safetensors")
     ap.add_argument("--out_dir", default="hgt_gen1/results")
     ap.add_argument("--test_size", type=int, default=300)
+    ap.add_argument("--num_laws_ref", default=None,
+                    help="기존 런의 answer_details jsonl. 지정 시 num_laws를 질의 텍스트로 "
+                         "매칭해 덮어써 층화 축을 기존 17런(250/46/5)과 맞춘다")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -56,6 +59,8 @@ def main():
     fsc = fsc_dataset_preprocessing(file=os.path.join(ROOT, "data/for_review_corrected.xlsx"),
                                     nodes_df=nodes_df, test_size=args.test_size)
     items, _ = build_retrieval_items(fsc[fsc.split == "test"].reset_index(drop=True), clause_list)
+    if args.num_laws_ref:
+        apply_num_laws_ref(items, load_num_laws_ref(os.path.join(ROOT, args.num_laws_ref)))
 
     encoder = make_bge_encoder()
     qemb = encode_texts_cached(encoder, [it["query"] for it in items], "fsc_query_embs").to(device)
@@ -68,28 +73,30 @@ def main():
         sims = model(qemb) @ clause_embs.T
         ranked = sims.topk(max(K_VALUES), dim=1).indices.tolist()
 
-    para_rows = compute_metric_rows(ranked, items)
-    art_rows = compute_article_metric_rows(ranked, items, build_article_expander(clause_list))
+    para_rows, mrr_col = compute_metric_rows(ranked, items)
+    art_rows, _ = compute_article_metric_rows(ranked, items, clause_list)
 
     out_dir = os.path.join(ROOT, args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     summary = {}
     for level, rows in (("paragraph", para_rows), ("article", art_rows)):
+        df = pd.DataFrame(rows)
         path = os.path.join(out_dir, f"hgt_gen1_{level}_{stamp}.csv")
-        pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
-        summary[level] = summarize_metrics(rows)
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        by_bucket = summarize_by_bucket(df, mrr_col=mrr_col)
+        summary[level] = by_bucket.to_dict(orient="records")
         head = "=== [주 지표] 항(paragraph) 단위 ===" if level == "paragraph" \
             else "=== [서브 지표] 조(article) 단위 ==="
         print(f"\n{head}")
-        print(pd.DataFrame(rows).drop(columns=["query"], errors="ignore")
-              .groupby("num_laws").mean(numeric_only=True).to_string())
+        print(by_bucket.to_string(index=False))
         print(f"  -> {path}")
 
     with open(os.path.join(out_dir, f"hgt_gen1_summary_{stamp}.json"), "w", encoding="utf-8") as f:
         json.dump({"n_test": len(items), "emb_dim": clause_embs.size(1),
                    "node_emb": args.node_emb, "ckpt": args.ckpt,
-                   "summary": summary}, f, ensure_ascii=False, indent=2)
+                   "num_laws_ref": args.num_laws_ref, "summary": summary}, f,
+                  ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
