@@ -34,3 +34,7 @@ emb_cache/
 # OS
 .DS_Store
 Thumbs.db
+# Gen1식 HGT 재학습 산출물 (재현 가능하므로 git 제외)
+hgt_gen1/graph/
+hgt_gen1/checkpoints/
+hgt_gen1/results/
