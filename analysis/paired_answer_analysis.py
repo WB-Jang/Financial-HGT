@@ -136,14 +136,37 @@ def interaction_test(d, m12, m34, rng):
 
 
 def holm(pvals):
-    """Holm-Bonferroni 보정. 입력 순서대로 보정된 p를 돌려준다."""
-    order = np.argsort(pvals)
-    adj = np.empty(len(pvals))
+    """Holm-Bonferroni 보정. 입력 순서대로 보정된 p를 돌려준다.
+
+    검정 불가(NaN — paired_test가 전부 동점일 때 반환)는 가족에서 빼고 유효 검정 수로만
+    보정한다. NaN을 그대로 넣으면 argsort가 뒤로 보내고 max(running, nan)이 nan을 무시해
+    (nan > running 이 False), 실패한 검정이 다른 검정의 보정 p를 물려받아 정상값처럼
+    기록된다. 게다가 승수 m이 NaN까지 세어 나머지가 과보정된다.
+    """
+    pvals = np.asarray(pvals, dtype=float)
+    adj = np.full(len(pvals), np.nan)
+    valid = np.flatnonzero(~np.isnan(pvals))
     running = 0.0
-    for rank, i in enumerate(order):
-        running = max(running, pvals[i] * (len(pvals) - rank))
+    for rank, i in enumerate(valid[np.argsort(pvals[valid])]):
+        running = max(running, pvals[i] * (len(valid) - rank))
         adj[i] = min(1.0, running)
     return adj
+
+
+def sign_test(values):
+    """양측 부호검정. 0은 시행에서 제외한다. -> (양수 개수, 유효 시행 수, p)
+
+    ⚠️ 시행 독립을 전제하는 검정인데 여기 묶이는 것들은 독립이 아니다. 계열 4종은 같은
+    301문항·같은 plain 기준선을 공유하고, alpha 5종은 같은 계열에 강도만 바꿔 건 개입이라
+    상관이 거의 1이다. 따라서 이 p는 증거를 과대평가한다 — 방향 일관성의 탐색적 지표로만
+    읽고, 유의성 주장의 근거로 쓰지 말 것.
+    """
+    pos = sum(1 for v in values if v > 0)
+    neg = sum(1 for v in values if v < 0)
+    m = pos + neg
+    if m == 0:
+        return pos, m, float('nan')
+    return pos, m, min(1.0, 2 * stats.binom.cdf(min(pos, neg), m, 0.5))
 
 
 def write_csv(path, header, rows):
@@ -211,8 +234,10 @@ def main():
             print(f'  a={alpha} {fam:7s} interaction={inter_rows[idx][4]:+.4f} '
                   f'CI[{inter_rows[idx][5]:+.4f},{inter_rows[idx][6]:+.4f}] '
                   f'p={inter_rows[idx][7]:.3f} holm={pvals[alpha][i]:.3f}')
-        signs = [inter_rows[len(inter_rows) - len(FAMILIES) + i][4] > 0 for i in range(len(FAMILIES))]
-        print(f'    부호일치: {sum(signs)}/{len(FAMILIES)} 양수 -> 부호검정 p={2 * 0.5 ** len(FAMILIES):.4f}')
+        pos, m_sign, p_sign = sign_test(
+            [inter_rows[len(inter_rows) - len(FAMILIES) + i][4] for i in range(len(FAMILIES))])
+        print(f'    부호일치: {pos}/{m_sign} 양수 (0 제외 {len(FAMILIES) - m_sign}) -> '
+              f'부호검정 p={p_sign:.4f}  ⚠️ 계열 간 상관 높음 — 탐색적 지표')
     write_csv(os.path.join(args.out_dir, 'interaction.csv'),
               ['alpha', 'family', 'delta_1_2', 'delta_3_4', 'interaction',
                'ci_low', 'ci_high', 'p_boot', 'p_holm'], inter_rows)
@@ -306,8 +331,9 @@ def main():
                      r['ci_low'], r['ci_high'], r['p_boot']])
         print(f'  a={a:.2f} d(1-2)={r["delta_12"]:+.4f} d(3-4)={r["delta_34"]:+.4f} '
               f'교호={r["interaction"]:+.4f} CI[{r["ci_low"]:+.4f},{r["ci_high"]:+.4f}] p={r["p_boot"]:.4f}')
-    pos = sum(1 for r in rows if r[3] > 0)
-    print(f'    부호일치: {pos}/{len(rows)} 양수 -> 부호검정 p={2 * 0.5 ** len(rows):.4f}')
+    pos, m_sign, p_sign = sign_test([r[3] for r in rows])
+    print(f'    부호일치: {pos}/{m_sign} 양수 (0 제외 {len(rows) - m_sign}) -> '
+          f'부호검정 p={p_sign:.4f}  ⚠️ alpha 간 상관 매우 높음 — 탐색적 지표')
     write_csv(os.path.join(args.out_dir, 'alpha_sweep_interaction.csv'),
               ['alpha', 'delta_1_2', 'delta_3_4', 'interaction', 'ci_low', 'ci_high', 'p_boot'], rows)
 
