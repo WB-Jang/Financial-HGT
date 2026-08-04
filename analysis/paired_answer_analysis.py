@@ -231,25 +231,38 @@ def main():
               ['family', 'n', 'ties', 'tie_rate', 'effective_n'], rows)
 
     # ── 5. hybrid alpha 용량-반응 곡선 ────────────────────────────────────
-    # breadth_assembly_retriever는 pool에서 blend 최댓값 1건만 맨 앞으로 올리고
-    # 나머지는 base 관련도순을 유지한다. 즉 alpha는 '1위에 무엇을 세울지'만 바꾼다.
+    # breadth_assembly_retriever는 pool(20건)에서 blend 최댓값 1건만 맨 앞으로 올리고
+    # 나머지는 base 관련도순을 유지한다(breadth_assembly_retriever.py:89-92). 다만 컨텍스트는
+    # 15건으로 잘리므로(eval_answers.py:336,341), lead가 pool 15~19위에서 나오면 base 14위가
+    # 밀려나 '검색 집합 자체'가 바뀐다. 실측 집합변경: a=.25 0건 / .50 10 / .60 34 / .80 49 / .90 54.
+    # 그 교체가 전부 비정답끼리였기 때문에(정답 출입 0회) recall@15/hit@15가 전 alpha에서
+    # 비트 단위로 같은 것이지, 집합이 불변이어서가 아니다. 이 구분이 중요하다 — 정답이 한 번이라도
+    # 드나들면 alpha 차이를 '맥락 순서 효과'로 귀속시킬 수 없다. gold_churn 열이 그 방어선이다.
     print('\n[검색 불변성] alpha가 검색 집합을 바꾸는가')
     inv_rows = []
     pl_lead = [r['retrieved'][0]['node'] for r in data['pl_hybrid']]
+    pl_set = [set(x['node'] for x in r['retrieved']) for r in data['pl_hybrid']]
     gold = [set(r['gold_positives']) for r in data['pl_hybrid']]
     for name, alpha in ALPHA_SWEEP:
         got = [set(x['node'] for x in r['retrieved']) for r in data[name]]
         lead = [r['retrieved'][0]['node'] for r in data[name]]
-        rec = float(np.mean([len(g & p) / len(p) for g, p in zip(got, gold)]))
-        hit = float(np.mean([1.0 if g & p else 0.0 for g, p in zip(got, gold)]))
+        rec = float(np.mean([len(ret & gld) / len(gld) for ret, gld in zip(got, gold)]))
+        hit = float(np.mean([1.0 if ret & gld else 0.0 for ret, gld in zip(got, gold)]))
         promo = sum(1 for a, b in zip(lead, pl_lead) if a != b)
-        lead_hit = sum(1 for l, p in zip(lead, gold) if l in p)
-        inv_rows.append([alpha, rec, hit, promo, promo / len(lead), lead_hit, lead_hit / len(lead)])
+        lead_hit = sum(1 for l, gld in zip(lead, gold) if l in gld)
+        changed = sum(1 for ret, base in zip(got, pl_set) if ret != base)
+        churn = sum(len((base - ret) & gld) + len((ret - base) & gld)
+                    for ret, base, gld in zip(got, pl_set, gold))
+        inv_rows.append([alpha, rec, hit, changed, churn, promo, promo / len(lead),
+                         lead_hit, lead_hit / len(lead)])
         print(f'  a={alpha:.2f} recall@15={rec:.6f} hit@15={hit:.6f} '
+              f'집합변경={changed:3d} 정답출입={churn:2d} '
               f'1위교체={promo:3d}/{len(lead)} 1위정답={lead_hit:3d}({lead_hit / len(lead) * 100:.1f}%)')
+    if any(r[4] for r in inv_rows):
+        print('  ⚠️ 정답출입 != 0 — 검색 품질이 실제로 달라졌다. alpha 효과를 순서 효과로 해석할 수 없다')
     write_csv(os.path.join(args.out_dir, 'alpha_sweep_retrieval.csv'),
-              ['alpha', 'recall@15', 'hit@15', 'lead_changed', 'lead_changed_rate',
-               'lead_is_gold', 'lead_is_gold_rate'], inv_rows)
+              ['alpha', 'recall@15', 'hit@15', 'set_changed', 'gold_churn',
+               'lead_changed', 'lead_changed_rate', 'lead_is_gold', 'lead_is_gold_rate'], inv_rows)
 
     sweep = [(n, a) for n, a in ALPHA_SWEEP if a > 0]
     print('\n[alpha 용량-반응] alpha - plain (양수 = breadth 우세)')
