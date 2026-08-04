@@ -95,18 +95,30 @@ def reference_avg(rows):
 
 
 def paired_test(x, y, mask, rng):
-    """x-y의 문항 페어링 검정. 어느 한쪽이 결측인 문항은 제외(쌍별 제외)."""
+    """x-y의 문항 페어링 검정. 어느 한쪽이 결측인 문항은 제외(쌍별 제외).
+
+    p를 두 개 낸다. 둘은 서로 다른 추정량에 대한 검정이므로 결론이 갈릴 수 있다:
+      p_wilcoxon — 부호+크기 '순위'. 동점을 버리므로 유효표본이 n보다 훨씬 작다.
+                   크기가 들쭉날쭉해도 순위로 압축되어 이상치에 강하다.
+      p_boot     — '평균'. ci_low/ci_high와 같은 추정량이라 CI와 항상 정합적이다.
+                   크기를 그대로 쓰므로 이상치가 분산을 키워 보수적으로 나오는 경향.
+    """
     m = mask & ~np.isnan(x) & ~np.isnan(y)
     d = (x - y)[m]
     n = len(d)
+    delta = d.mean()
     boot = d[rng.integers(0, n, (N_BOOT, n))].mean(axis=1)
     lo, hi = np.percentile(boot, [2.5, 97.5])
+    # 귀무(평균 0) 중심 재표집. (d - delta)[idx].mean() == d[idx].mean() - delta 이므로
+    # 같은 재표집을 평행이동하면 된다 — 난수를 추가로 소비하지 않아 기존 CI가 그대로 보존된다.
+    # (1+k)/(1+B): 재표집 p의 하한은 1/(B+1)이다. 0을 보고하지 않기 위한 표준 보정.
+    p_boot = (1 + int((np.abs(boot - delta) >= abs(delta)).sum())) / (1 + N_BOOT)
     try:
         p = stats.wilcoxon(d, zero_method='wilcox').pvalue
     except ValueError:  # 전부 동점이면 검정 불가
         p = float('nan')
     return {
-        'n': n, 'delta': d.mean(), 'ci_low': lo, 'ci_high': hi, 'p_wilcoxon': p,
+        'n': n, 'delta': delta, 'ci_low': lo, 'ci_high': hi, 'p_wilcoxon': p, 'p_boot': p_boot,
         'win': int((d > 0).sum()), 'loss': int((d < 0).sum()), 'tie': int((d == 0).sum()),
     }
 
@@ -171,13 +183,14 @@ def main():
             for bname, bmask in buckets:
                 r = paired_test(R[f'{tag}_{fam}'], R[f'pl_{fam}'], bmask, rng)
                 rows.append([fam, bname, r['n'], r['delta'], r['ci_low'], r['ci_high'],
-                             r['p_wilcoxon'], r['win'], r['loss'], r['tie']])
+                             r['p_wilcoxon'], r['p_boot'], r['win'], r['loss'], r['tie']])
                 print(f'  {fam:7s} {bname:4s} n={r["n"]:3d} delta={r["delta"]:+.4f} '
-                      f'CI[{r["ci_low"]:+.4f},{r["ci_high"]:+.4f}] p={r["p_wilcoxon"]:.3f} '
+                      f'CI[{r["ci_low"]:+.4f},{r["ci_high"]:+.4f}] '
+                      f'p_w={r["p_wilcoxon"]:.3f} p_b={r["p_boot"]:.3f} '
                       f'{r["win"]}/{r["loss"]}/{r["tie"]}')
         write_csv(os.path.join(args.out_dir, f'net_effect_alpha{alpha.replace(".", "")}.csv'),
-                  ['family', 'bucket', 'n', 'delta', 'ci_low', 'ci_high', 'p_wilcoxon', 'win', 'loss', 'tie'],
-                  rows)
+                  ['family', 'bucket', 'n', 'delta', 'ci_low', 'ci_high', 'p_wilcoxon', 'p_boot',
+                   'win', 'loss', 'tie'], rows)
 
     # ── 2. 교호작용 (다법에서 효과가 더 큰가) ─────────────────────────────
     m12 = num_laws <= 2
@@ -211,11 +224,13 @@ def main():
         for bname, bmask in buckets:
             r = paired_test(R[f'br80_{fam}'], R[f'br25_{fam}'], bmask, rng)
             rows.append([fam, bname, r['n'], r['delta'], r['ci_low'], r['ci_high'],
-                         r['p_wilcoxon'], r['win'], r['loss'], r['tie']])
+                         r['p_wilcoxon'], r['p_boot'], r['win'], r['loss'], r['tie']])
             print(f'  {fam:7s} {bname:4s} n={r["n"]:3d} delta={r["delta"]:+.4f} '
-                  f'CI[{r["ci_low"]:+.4f},{r["ci_high"]:+.4f}] p={r["p_wilcoxon"]:.3f}')
+                  f'CI[{r["ci_low"]:+.4f},{r["ci_high"]:+.4f}] '
+                  f'p_w={r["p_wilcoxon"]:.3f} p_b={r["p_boot"]:.3f}')
     write_csv(os.path.join(args.out_dir, 'alpha_comparison.csv'),
-              ['family', 'bucket', 'n', 'delta', 'ci_low', 'ci_high', 'p_wilcoxon', 'win', 'loss', 'tie'], rows)
+              ['family', 'bucket', 'n', 'delta', 'ci_low', 'ci_high', 'p_wilcoxon', 'p_boot',
+               'win', 'loss', 'tie'], rows)
 
     # ── 4. 검정력 진단: 동점률이 유효표본을 얼마나 깎는가 ────────────────
     print('\n[동점률 진단] 3-4법 버킷')
@@ -270,14 +285,17 @@ def main():
     for bname, bmask in buckets:
         res = [paired_test(R[n], R['pl_hybrid'], bmask, rng) for n, _ in sweep]
         adj = holm(np.array([r['p_wilcoxon'] for r in res]))
-        for (n, a), r, h in zip(sweep, res, adj):
+        adj_b = holm(np.array([r['p_boot'] for r in res]))
+        for (n, a), r, h, hb in zip(sweep, res, adj, adj_b):
             rows.append([a, bname, r['n'], r['delta'], r['ci_low'], r['ci_high'],
-                         r['p_wilcoxon'], h, r['win'], r['loss'], r['tie']])
+                         r['p_wilcoxon'], h, r['p_boot'], hb, r['win'], r['loss'], r['tie']])
             print(f'  {bname:4s} a={a:.2f} n={r["n"]:3d} delta={r["delta"]:+.4f} '
-                  f'CI[{r["ci_low"]:+.4f},{r["ci_high"]:+.4f}] p={r["p_wilcoxon"]:.4f} '
-                  f'holm={h:.4f} {r["win"]}/{r["loss"]}/{r["tie"]}')
+                  f'CI[{r["ci_low"]:+.4f},{r["ci_high"]:+.4f}] '
+                  f'p_w={r["p_wilcoxon"]:.4f}/holm={h:.4f} '
+                  f'p_b={r["p_boot"]:.4f}/holm={hb:.4f} {r["win"]}/{r["loss"]}/{r["tie"]}')
     write_csv(os.path.join(args.out_dir, 'alpha_sweep_vs_plain.csv'),
-              ['alpha', 'bucket', 'n', 'delta', 'ci_low', 'ci_high', 'p_wilcoxon', 'p_holm',
+              ['alpha', 'bucket', 'n', 'delta', 'ci_low', 'ci_high',
+               'p_wilcoxon', 'p_wilcoxon_holm', 'p_boot', 'p_boot_holm',
                'win', 'loss', 'tie'], rows)
 
     print('\n[alpha 용량-반응 교호작용] delta(3-4) - delta(1-2)')
